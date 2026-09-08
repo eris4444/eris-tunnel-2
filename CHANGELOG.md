@@ -7,61 +7,74 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
-- **Local SOCKS5 proxy over the tunnel.** Alongside plain port forwarding, a
-  tunnel can now be handed out as an outbound proxy:
+- **Tunnel modes.** An IRAN tunnel is now created as one of two shapes, picked
+  from a menu right after the public ip is entered:
+
+  - `port forward` — the classic one. Ports on IRAN reach a panel on KHAREJ.
+  - `socks5 proxy` — the tunnel is handed out as an outbound proxy instead.
+
+- **Proxy mode runs the socks5 server on IRAN itself**, and chains it through
+  the tunnel to an exit on KHAREJ:
 
   ```
-  app --socks5--> IRAN:users_port --tunnel--> 127.0.0.1:socks_port on KHAREJ --> internet
+  app -socks5-> IRAN 0.0.0.0:PROXY_PORT      socks5 server on IRAN
+                   chained to
+                IRAN 127.0.0.1:BRIDGE_PORT   backhaul, loopback-bound
+                   tunnel
+                KHAREJ 127.0.0.1:EXIT_PORT   socks5 exit
+                   out to the internet
   ```
 
-  The exit ip a site sees is the KHAREJ one. Turn it on from
-  `Manage tunnels -> [9] SOCKS5 proxy`, or answer the new prompt while creating
-  an IRAN tunnel.
+  The exit ip a site sees is the KHAREJ one. The **only publicly bound port is
+  IRAN's own socks listener**, and it always asks for a username and password.
+  The tunnel's own hop is `127.0.0.1:BRIDGE_PORT` on IRAN, so nothing but the
+  local proxy can reach it — Backhaul's documented `"127.0.0.1:port=target"`
+  form makes that bind possible.
 
-- The proxy runs on the KHAREJ server as `eris-socks@<tunnel>.service`, bound to
-  **127.0.0.1 only**, so the tunnel is the sole way in. Credentials are
-  mandatory - there is no unauthenticated mode, because the port is reachable
-  from the internet through the IRAN side.
+- Both ends run the proxy as `eris-proxy@<tunnel>.service`. One unit template
+  serves both roles: the whole argument list lives in a per-tunnel `proxy.env`
+  (mode 600) and reaches `ExecStart` as an unbraced `$GOST_ARGS`, which systemd
+  splits on whitespace — so credentials never sit in the unit file.
 
-- Provider is picked automatically: **microsocks** from the distribution's own
-  repository when it is packaged there, otherwise a pinned-architecture
-  **gost** binary from GitHub releases (sha256 shown before it is installed).
+- `gost` is the proxy engine, installed on demand from GitHub releases for the
+  detected architecture, with its sha256 printed first. It is the only small
+  proxy that both serves socks5 and chains to an upstream one, which is exactly
+  what proxy mode needs.
 
-- On the IRAN side the proxy is just another mapped port
-  (`users_port = 127.0.0.1:socks_port`), so traffic accounting, the health
-  check and the ports screen all understand it. The ports list labels that row
-  `-> socks5 proxy on kharej`, and deleting it turns socks off rather than
-  leaving a dangling mapping.
+- A tunnel can be moved between modes later from `Manage tunnels -> [9] SOCKS5
+  proxy`, on either side. The user-port list is kept while a tunnel sits in
+  proxy mode, so switching back restores it untouched.
 
-- `[t] Test the proxy` dials out through the proxy and prints the exit ip, from
-  either side.
+- `[t] Test it` dials out through the proxy and prints the exit ip — from IRAN
+  it proves the whole chain, from KHAREJ just the exit.
+  `[5] Client settings` prints a ready `socks5://user:pass@host:port` line.
 
-- `[5] Client settings` prints the host, port, user, password and a ready
-  `socks5://user:pass@host:port` line to paste into an app.
-
-- Health check reports the proxy service and its listening socket on KHAREJ,
-  and the dashboard's LISTENING panel now includes the proxy's sockets.
+- Traffic accounting follows the mode: user ports in forward mode, the socks
+  port in proxy mode. Health check gained the bridge socket, the proxy service
+  and the exit socket.
 
 ### Changed
 
-- **Pair code is now B3** and carries the socks port, public port, user and
-  password, so pairing a KHAREJ server sets its proxy up in one step. Codes are
-  emitted with an `ETN-` prefix. **B2 and B1 codes still parse**, and `DBH-`
-  prefixed codes from Eris Tunnel 2 1.0.2 and DARK VPN Backhaul keep working.
-- Every socks field arriving in a pair code is validated before use, and
-  re-validated on each `meta.conf` load: user `A-Z a-z 0-9 _ -` (1-32), password
-  `A-Z a-z 0-9 . _ + -` (6-64). `:` `@` `/` and every shell metacharacter are
-  refused, so nothing hostile can reach the systemd unit or the proxy url.
-  A tunnel whose socks fields do not survive validation is loaded with socks off
-  instead of half-configured.
-- Credentials live in a per-tunnel `socks.env` (mode 600) referenced by the unit
-  as an `EnvironmentFile`, never inside the unit file itself.
+- **Pair code is now B4**, carrying the mode, the exit port, the public proxy
+  port and the credentials, so pairing a KHAREJ server brings its exit up in one
+  step. Codes are emitted with an `ETN-` prefix. **B3, B2 and B1 still parse**,
+  and `DBH-` prefixed codes from 1.0.2 and from DARK VPN Backhaul keep working.
+  The bridge port is IRAN-local plumbing and is deliberately not in the code.
+- Every mode and proxy field is validated on arrival and re-validated on each
+  `meta.conf` load: user `A-Z a-z 0-9 _ -` (1–32), password
+  `A-Z a-z 0-9 . _ + -` (6–64). `:` `@` `/` and every shell metacharacter are
+  refused, so nothing hostile reaches the systemd unit or the proxy url. A
+  tunnel that lacks anything proxy mode needs loads as a plain forward, never as
+  half of one.
+- Proxy mode refuses the `udp` transport, and switches a new tunnel to the
+  default transport rather than building something that cannot work.
 - `gh_asset_url` was split so a release asset can be resolved for any
   repository, not just the Backhaul core.
-- Tunnels created before this version gain the new `meta.conf` keys on first
-  load, with socks off.
 - `meta_set` replaces the scattered `sed -i` calls that edited `meta.conf`, and
   appends a key that is not there yet instead of silently doing nothing.
+- Tunnels created before this version gain `MODE="forward"` and the proxy keys
+  on first load, and behave exactly as they did.
+- The dashboard's LISTENING panel now includes the proxy's sockets.
 
 ### Fixed
 
@@ -69,10 +82,15 @@ This project follows [Semantic Versioning](https://semver.org/).
   its `meta.conf`, carried over from an IRAN tunnel visited earlier in the same
   session. Both are now cleared before the metadata is written.
 
-### Removed / cleanup
+### Removed
 
-- Uninstall now also removes `eris-socks@.service` and the downloaded gost
-  binary.
+- The first 1.5.1 build published the proxy the other way round — a socks server
+  on KHAREJ reached through an ordinary forwarded port — which left the only
+  authentication out on the far side of the tunnel. That shape is gone. On
+  startup the manager takes down and deletes the `eris-socks@` unit it left
+  behind, so nothing keeps listening under rules this build no longer applies.
+  Turn proxy mode on again from a tunnel's `[9]` screen.
+- Uninstall now also removes `eris-proxy@.service` and the gost binary.
 
 ## [1.0.2] - 2026-09-08
 

@@ -31,6 +31,13 @@ monitoring, testing and troubleshooting reverse tunnels powered by
 > **KHAREJ = Client**
 > The Pair Code is generated on IRAN and pasted on KHAREJ.
 
+A tunnel is created in one of **two modes**, picked from a menu:
+
+| Mode | What your users get |
+| --- | --- |
+| **Port forward** | Ports on the IRAN server that reach a panel on KHAREJ |
+| **SOCKS5 proxy** | A socks5 proxy on the IRAN server whose traffic exits from KHAREJ |
+
 ## Quick Install
 
 ```
@@ -65,9 +72,9 @@ USER
 
 ## Core Features
 
-- Guided IRAN / KHAREJ tunnel creation
-- **Local SOCKS5 proxy**: hand the tunnel out as an outbound proxy
-- Pair Code V3, with B2 / B1 backward compatibility
+- Guided IRAN / KHAREJ tunnel creation, in port-forward or socks5-proxy mode
+- **SOCKS5 proxy mode**: a proxy on IRAN that exits from the KHAREJ ip
+- Pair Code V4, with B3 / B2 / B1 backward compatibility
 - Multi-port forwarding and custom target mapping
 - Transports: `tcp`, `tcpmux`, `ws`, `wsmux`, `wss`, `wssmux`, `udp`
 - Performance profiles: Stable, Balanced, Low Ping, Turbo
@@ -101,7 +108,8 @@ USER
 - Port conflict checks
 - Dependency installer
 - Custom update source
-- SOCKS5 credential rotation and live proxy test
+- Switch a tunnel between forward and proxy mode at any time
+- Proxy credential rotation and a live end-to-end proxy test
 - Install as `eristun2`
 - Full uninstall
 
@@ -125,50 +133,55 @@ appears on the IRAN side, since that is the only side that produces one.
 CONTROL     1 Start        2 Stop       3 Restart
 PAIRING     p Pair code                              (IRAN only)
 CONFIGURE   4 Ports        5 Tuning     6 Endpoint    7 Scheduled restart
-            9 SOCKS5 proxy
+            9 SOCKS5 proxy                     (4 is forward mode only)
 INSPECT     8 Show config  s Speed test L Logs + connections
 ADVANCED    e Edit config by hand       d Delete tunnel
 ```
 
-## SOCKS5 Proxy
+## SOCKS5 Proxy Mode
 
-Besides forwarding fixed ports, a tunnel can be handed out as an outbound
-proxy. Apps speak SOCKS5 to the IRAN server, the tunnel carries it to KHAREJ,
-and the traffic leaves from there:
+Instead of forwarding fixed ports, a tunnel can be handed out as an outbound
+proxy. The socks5 server runs **on the IRAN server itself** and chains through
+the tunnel to an exit on KHAREJ:
 
 ```
-app --socks5--> IRAN:users_port --tunnel--> 127.0.0.1:socks_port (KHAREJ) --> internet
+app -socks5-> IRAN 0.0.0.0:PROXY_PORT      socks5 server on IRAN
+                 chained to
+              IRAN 127.0.0.1:BRIDGE_PORT   backhaul, loopback-bound
+                 tunnel
+              KHAREJ 127.0.0.1:EXIT_PORT   socks5 exit
+                 out to the internet
 ```
 
-So the exit ip a site sees is the **KHAREJ** one.
+The exit ip a site sees is the **KHAREJ** one.
 
-Turn it on from `Manage tunnels -> [9] SOCKS5 proxy` on the IRAN side, or answer
-the prompt while creating an IRAN tunnel. Pair the KHAREJ server afterwards and
-it sets its own proxy up from the pair code in one step.
+Pick `SOCKS5 proxy` when creating the IRAN tunnel, then pair the KHAREJ server —
+it brings its own exit up from the pair code in one step. An existing tunnel can
+be moved between modes from `Manage tunnels -> [9] SOCKS5 proxy`.
 
 | | |
 | --- | --- |
-| Service on KHAREJ | `eris-socks@<tunnel>.service` |
-| Bind address | `127.0.0.1` only - the tunnel is the sole way in |
-| Provider | `microsocks` from the distro, else `gost` from GitHub releases |
-| Credentials | mandatory, stored in `socks.env` (mode 600) |
+| Service, both ends | `eris-proxy@<tunnel>.service` |
+| Publicly bound | only IRAN's socks listener, and it always needs credentials |
+| Tunnel hop | `127.0.0.1:BRIDGE_PORT` on IRAN — nothing but the local proxy reaches it |
+| Proxy engine | `gost`, installed on demand from GitHub releases |
+| Credentials | kept in `proxy.env` (mode 600), never in the unit file |
 | Transport | TCP only; SOCKS5 UDP ASSOCIATE is not carried |
 
-On the IRAN side the proxy is just another mapped port
-(`users_port = 127.0.0.1:socks_port`), so traffic accounting, the health check
-and the ports screen all understand it.
+Worth knowing:
 
-Two things worth knowing:
+- The bridge port is IRAN-local plumbing. It is bound to loopback, is not in the
+  pair code, and you never need to open it in a firewall. Open `PROXY_PORT` for
+  your users and the tunnel port for KHAREJ, nothing else.
+- Proxy mode needs a TCP transport; `udp` is refused.
+- While a tunnel is in proxy mode its user-port list is kept but not forwarded,
+  so switching back to forward mode restores it untouched.
+- Changing the proxy port or credentials on IRAN means re-pairing KHAREJ, or
+  setting the same values there by hand.
 
-- Credentials are **required**, because the port is reachable from the internet
-  through the IRAN side. Every client arrives at the proxy as `127.0.0.1`, so
-  ip-based restrictions are meaningless here and the password is the only gate.
-- Changing the ports or credentials on IRAN means re-pairing KHAREJ, or setting
-  the same values there by hand. Changing plain user ports still needs no
-  re-pairing.
-
-`[t] Test the proxy` dials out through it and prints the exit ip, and
-`[5] Client settings` prints a ready `socks5://user:pass@host:port` line.
+`[t] Test it` dials out through the proxy and prints the exit ip — from IRAN that
+exercises the whole chain. `[5] Client settings` prints a ready
+`socks5://user:pass@host:port` line.
 
 ## Diagnostics
 
@@ -228,11 +241,12 @@ https://raw.githubusercontent.com/eris4444/eris-tunnel-2/main/eris-tunnel-2.sh
 ```
 /etc/eris-tunnel-2/
 /etc/eris-tunnel-2/tunnels/
-/etc/eris-tunnel-2/tunnels/<name>/socks.env
+/etc/eris-tunnel-2/tunnels/<name>/proxy.env
 /etc/eris-tunnel-2/certs/
 /etc/systemd/system/backhaul@.service
-/etc/systemd/system/eris-socks@.service
+/etc/systemd/system/eris-proxy@.service
 /usr/local/bin/backhaul
+/usr/local/bin/eris-gost
 /usr/local/bin/eristun2
 ```
 
