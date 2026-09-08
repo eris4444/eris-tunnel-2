@@ -22,7 +22,7 @@
 <div dir="rtl">
 
 **مدیر پیشرفته تانل معکوس Backhaul**
-`نسخه 1.6.0`
+`نسخه 1.7.0`
 پشتیبانی: `@erisrttg`
 
 ---
@@ -140,6 +140,27 @@ USER
 | Low Ping | گیم و ترافیک حساس به تأخیر        |
 | Turbo    | تعداد کاربر و کانکشن بالا         |
 
+پروفایل موقع ساخت تانل انتخاب می‌شود و **هر زمان بعدش هم قابل تغییر است**، از
+مسیر `Manage tunnels -> [5] Profile`. آن صفحه هر چهار حالت را کنار هم مقایسه
+می‌کند و انتخابت را فوراً اعمال می‌کند: کانفیگ بازتولید می‌شود، سمت ایران پیرکد
+از نو صادر می‌شود و سرویس ری‌استارت می‌خورد.
+
+هر طرف فیلدهای خودش را دارد، و جدول فقط همان‌هایی را نشان می‌دهد که آن طرف
+واقعاً می‌نویسد:
+
+| | |
+| --- | --- |
+| ایران (سرور) | `channel_size` و `heartbeat` و `mux_con` |
+| خارج (کلاینت) | `connection_pool` و `aggressive_pool` و `retry_interval` و `dial_timeout` |
+| هر دو | `keepalive` و `nodelay` |
+
+فریمینگ mux در همه پروفایل‌ها یکسان است، پس دو سرور می‌توانند پروفایل متفاوت
+داشته باشند بدون اینکه تانل بشکند — ولی اگر می‌خواهی کل مسیر روی Turbo باشد،
+باید هر دو طرف را عوض کنی.
+
+تنظیمات پیشرفته (تغییر ترنسپورت و پین کردن مقادیر) با کلید `[a]` داخل همین
+صفحه Profile است.
+
 ## منوی تانل
 
 صفحه هر تانل بر اساس کاری که هر گزینه انجام می‌دهد گروه‌بندی شده است. گزینه
@@ -151,7 +172,7 @@ USER
 CONTROL     1 Start        2 Stop       3 Restart
 PAIRING     p Pair code                              (فقط ایران)
 CONFIGURE   4 Ports        9 SOCKS5 proxy      (گزینه ۴ فقط حالت فوروارد)
-            5 Tuning       6 Endpoint   7 Scheduled restart
+            5 Profile      6 Endpoint   7 Scheduled restart
 INSPECT     8 Show config  s Speed test L Logs + connections
 ADVANCED    e Edit config by hand       d Delete tunnel
 ```
@@ -348,7 +369,7 @@ systemctl start 'backhaul@*'
 
 ```
 Eris Tunnel 2
-Version: 1.6.0
+Version: 1.7.0
 Support: @erisrttg
 ```
 

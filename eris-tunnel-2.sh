@@ -31,7 +31,7 @@
 #  ERIS-TUNNEL-2-SCRIPT
 # ==============================================================================
 
-SCRIPT_VER="1.6.0"
+SCRIPT_VER="1.7.0"
 DEV_ID="@erisrttg"
 
 GH_REPO="Musixal/Backhaul"
@@ -702,6 +702,34 @@ profile_hint() { case "$1" in
   balanced) echo "upstream defaults - safe start" ;;
   lowping)  echo "small frames - lowest latency" ;;
   turbo)    echo "big pool + buffers - many users" ;; esac; }
+
+# Only the fields this side actually writes into its own config are worth
+# showing: connection_pool / aggressive / retry / dial are client-only,
+# channel_size / heartbeat / mux_con are server-only, keepalive is used by both.
+profile_cols_head() {
+  if [ "$ROLE" = server ]; then
+    printf '%s%-11s %8s %6s %7s %5s%s' "$D" "" "channel" "hbeat" "kalive" "mux" "$N"
+  else
+    printf '%s%-11s %5s %5s %7s %6s %5s%s' "$D" "" "pool" "aggr" "kalive" "retry" "dial" "$N"
+  fi
+}
+profile_cols_row() { # <profile>  - subshell so P_* of the caller survive
+  ( local mk="  "
+    [ "$1" = "${PROFILE:-balanced}" ] && mk="$G$BD▸$N "
+    profile_apply "$1"
+    if [ "$ROLE" = server ]; then
+      printf '%s%s%-9s%s %s%8s %6s %7s %5s%s' "$mk" "$W" "$(profile_name "$1")" "$N" "$D" \
+        "$P_CHANNEL" "$P_HEARTBEAT" "$P_KEEPALIVE" "$P_MUXCON" "$N"
+    else
+      printf '%s%s%-9s%s %s%5s %5s %7s %6s %5s%s' "$mk" "$W" "$(profile_name "$1")" "$N" "$D" \
+        "$P_POOL" "$([ "$P_AGGRESSIVE" = true ] && echo yes || echo no)" \
+        "$P_KEEPALIVE" "$P_RETRY" "$P_DIAL" "$N"
+    fi )
+}
+profile_other_side() {
+  if [ "$ROLE" = server ]; then echo "connection_pool, aggressive, retry, dial_timeout"
+  else echo "channel_size, heartbeat, mux_con"; fi
+}
 
 pick_profile() {
   { echo; top; sect "PERFORMANCE PROFILE"
@@ -2194,6 +2222,89 @@ ov_set() { # <meta-key> <prompt> <validator> [warn-shared]
   ok "$key pinned to $v"
 }
 
+# The profile can be changed for the life of a tunnel, not just when it is
+# created. Applying regenerates the config, re-issues the pair code on the IRAN
+# side and restarts the service, so nothing has to be done by hand afterwards.
+profile_apply_now() { # <name>
+  regen_config "$1" || return 1
+  load_meta "$1"
+  if [ "$ROLE" = server ]; then
+    make_pair_code "$TUN_DIR/$1" > "$TUN_DIR/$1/pair.code"
+    chmod 600 "$TUN_DIR/$1/pair.code"
+  fi
+  systemctl restart "backhaul@$1" 2>/dev/null; sleep 2
+  [ "$(svc_raw "$1")" = active ]
+}
+
+screen_profile() {
+  local name="$1"
+  while :; do
+    load_meta "$name"
+    local pins; pins="$(ov_count)"
+    header "PROFILE - $name"
+    top; sect "WHAT A PROFILE CHANGES"
+    row "$(printf '%spool, channel size, heartbeat, keepalive and mux_con. mux%s' "$D" "$N")"
+    row "$(printf '%sframing is identical in every profile, so the two servers%s' "$D" "$N")"
+    row "$(printf '%smay run different profiles without breaking the tunnel.%s' "$D" "$N")"
+    mid; sect "CURRENT"; blank
+    kv "profile" "$W$(printf '%-10s' "$(profile_name "${PROFILE:-balanced}")")$N$D$(profile_hint "${PROFILE:-balanced}")$N"
+    kv "side"    "$W$([ "$ROLE" = server ] && echo "IRAN (server)" || echo "KHAREJ (client)")$N"
+    kv "pinned"  "$W$pins$N$D of 13 values overridden$N"
+    if [ "$pins" -gt 0 ]; then
+      row "$(printf '%spinned values win over the profile - clear them with [r]%s' "$Y" "$N")"
+    fi
+    mid; sect "WHAT EACH ONE SETS ON THIS SIDE"; blank
+    row "$(profile_cols_head)"
+    row "$(profile_cols_row stable)"
+    row "$(profile_cols_row balanced)"
+    row "$(profile_cols_row lowping)"
+    row "$(profile_cols_row turbo)"
+    blank
+    row "$(printf '%sthe other side owns the fields this one does not:%s' "$D" "$N")"
+    row "$(printf '%s  %s%s' "$D" "$(profile_other_side)" "$N")"
+    mid
+    item 1 "Stable"   "$(profile_hint stable)"
+    item 2 "Balanced" "$(profile_hint balanced)"
+    item 3 "Low Ping" "$(profile_hint lowping)"
+    item 4 "Turbo"    "$(profile_hint turbo)"
+    item r "Clear pinned values" "let the profile decide again"
+    item a "Advanced tuning" "transport and per-value pins"
+    item 0 "Back" ""
+    bot; echo; getkey
+    local np=""
+    case "$KEY" in
+      1) np=stable ;; 2) np=balanced ;; 3) np=lowping ;; 4) np=turbo ;;
+      r|R) if [ "$pins" -eq 0 ]; then info "nothing is pinned"; pause; continue; fi
+           yesno "clear all $pins pinned value(s)?" y || { pause; continue; }
+           sed -i 's|^\(OV_[A-Z]*\)=.*|\1=""|' "$TUN_DIR/$name/meta.conf"
+           if profile_apply_now "$name"; then ok "pins cleared - the profile is in charge again"
+           else bad "did not come back up"; fi
+           pause; continue ;;
+      a|A) screen_tuning "$name"; continue ;;
+      0|_) return ;;
+      *) continue ;;
+    esac
+    if [ "$np" = "${PROFILE:-balanced}" ]; then
+      info "already on $(profile_name "$np")"; pause; continue
+    fi
+    meta_set "$name" PROFILE "$np"
+    echo
+    if profile_apply_now "$name"; then
+      ok "profile: $(profile_name "$np") - applied and running"
+    else
+      bad "the tunnel did not come back up on $(profile_name "$np")"
+      dim "journalctl -u backhaul@$name -n 30"
+    fi
+    [ "$(ov_count)" -gt 0 ] && warn "$(ov_count) pinned value(s) still override part of it"
+    if [ "$ROLE" = server ]; then
+      dim "the pair code changed; kharej keeps its own profile unless you change it there"
+    else
+      dim "the iran side keeps its own profile unless you change it there too"
+    fi
+    pause
+  done
+}
+
 screen_tuning() {
   local name="$1"; TUNE_NAME="$name"
   while :; do
@@ -2201,13 +2312,12 @@ screen_tuning() {
     header "TUNING - $name"
     top; sect "TRANSPORT"; blank
     kv "transport" "$W$TRANSPORT$N $D(must match the other server)$N"
-    kv "profile"   "$W$(profile_name "${PROFILE:-balanced}")$N $D$(profile_hint "${PROFILE:-balanced}")$N"
+    kv "profile"   "$W$(profile_name "${PROFILE:-balanced}")$N $D(change it on the Profile screen)$N"
     kv "pinned"    "$W$(ov_count)$N $D of 13 values overridden$N"
     mid; sect "EFFECTIVE VALUES"
     tune_table
     mid
     item t "Change transport" "and certificate if needed"
-    item p "Change profile" "resets every unpinned value"
     item r "Clear all pins" "go back to pure profile"
     item 0 "Back and apply" ""
     bot; echo; getkey
@@ -2232,11 +2342,6 @@ screen_tuning() {
            fi
            sed -i "s|^TRANSPORT=.*|TRANSPORT=\"$nt\"|" "$TUN_DIR/$name/meta.conf"
            warn "set transport=$nt on the other server too" ; pause ;;
-      p|P) local np; np="$(pick_profile)"
-           sed -i "s|^PROFILE=.*|PROFILE=\"$np\"|" "$TUN_DIR/$name/meta.conf"
-           ok "profile: $(profile_name "$np")"
-           [ "$(ov_count)" -gt 0 ] && warn "$(ov_count) pinned value(s) still override it"
-           pause ;;
       r|R) sed -i 's|^\(OV_[A-Z]*\)=.*|\1=""|' "$TUN_DIR/$name/meta.conf"
            ok "all pins cleared - the profile is in charge again"; pause ;;
       0|_)
@@ -2308,7 +2413,7 @@ screen_manage() {
     mid; sect "CONFIGURE"
     [ "$ROLE" = server ] && [ "$MODE" != proxy ] && item 4 "Ports" "user-facing ports"
     item 9 "SOCKS5 proxy" "$([ "$MODE" = proxy ] && echo "on - $([ "$ROLE" = server ] && echo "port $PROXY_PORT" || echo "exit $EXIT_PORT")" || echo "off - hand the tunnel out as a proxy")"
-    item 5 "Tuning" "transport, profile, advanced"
+    item 5 "Profile" "$(profile_name "${PROFILE:-balanced}") - performance preset"
     item 6 "Endpoint" "port or peer ip"
     item 7 "Scheduled restart" ""
     mid; sect "INSPECT"
@@ -2326,7 +2431,7 @@ screen_manage() {
       3) systemctl restart "backhaul@$name" 2>/dev/null; sleep 2 ;;
       4) if [ "$ROLE" = server ]; then screen_ports "$name"
          else info "user ports are configured on the IRAN server"; pause; fi ;;
-      5) screen_tuning "$name" ;;
+      5) screen_profile "$name" ;;
       6) screen_endpoint "$name" ;;
       9) screen_proxy "$name" ;;
       s|S) speed_screen "$name" ;;

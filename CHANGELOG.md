@@ -3,6 +3,49 @@
 All notable changes to **Eris Tunnel 2** are recorded here.
 This project follows [Semantic Versioning](https://semver.org/).
 
+## [1.7.0] - 2026-09-08
+
+### Added
+
+- **A Profile screen, on `[5]` of every tunnel.** The performance profile was
+  always changeable after a tunnel was built, but it sat two levels down at
+  `Tuning -> [p]` and applied only on the way out. It is now a screen of its own
+  and the first thing under CONFIGURE:
+
+  ```
+  WHAT EACH ONE SETS ON THIS SIDE
+                channel  hbeat  kalive   mux
+    Stable         1024     30      20     4
+    Balanced       2048     40      75     8
+    Low Ping       2048     20      20     8
+  ▸ Turbo          4096     40      60    16
+  ```
+
+- The table shows **only the fields this side actually writes**, because the
+  split is real: `connection_pool`, `aggressive_pool`, `retry_interval` and
+  `dial_timeout` are client-only; `channel_size`, `heartbeat` and `mux_con` are
+  server-only; `keepalive` is used by both. A footer names what the other side
+  owns, so a Turbo IRAN with a Balanced KHAREJ is an obvious state rather than a
+  silent one.
+
+- Picking a profile **applies immediately**: the config is regenerated, the pair
+  code is re-issued on the IRAN side, and the service is restarted. Re-picking
+  the profile already in use says so instead of restarting for nothing.
+
+- If pinned values still override part of the profile you switched to, the screen
+  says how many, and `[r]` clears them and re-applies in one step.
+
+- `[a]` from the Profile screen reaches the advanced tuning screen, which keeps
+  the transport switch and the per-value pins.
+
+### Changed
+
+- `[5]` in the tunnel menu is now **Profile** and shows the current one in its
+  hint; advanced tuning moved one keypress deeper, behind `[a]` there. Every
+  other key in that menu is unchanged.
+- The tuning screen no longer carries its own `[p] Change profile`, so there is
+  one place that owns the profile instead of two.
+
 ## [1.6.0] - 2026-09-08
 
 ### Added

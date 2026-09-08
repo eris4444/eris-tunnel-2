@@ -16,7 +16,7 @@
 ```
 
 **Advanced Backhaul Reverse Tunnel Manager**
-`Version 1.6.0`
+`Version 1.7.0`
 Support: `@erisrttg`
 
 ---
@@ -124,6 +124,25 @@ USER
 | Low Ping | Gaming and latency-sensitive traffic |
 | Turbo    | High user / connection counts        |
 
+A profile is picked when the tunnel is created and can be **changed at any time
+afterwards** from `Manage tunnels -> [5] Profile`. The screen compares all four
+side by side and applies the one you pick straight away: the config is
+regenerated, the pair code is re-issued on the IRAN side, and the service is
+restarted.
+
+Each side owns different fields, and the table shows only the ones that side
+actually writes:
+
+| | |
+| --- | --- |
+| IRAN (server) | `channel_size`, `heartbeat`, `mux_con` |
+| KHAREJ (client) | `connection_pool`, `aggressive_pool`, `retry_interval`, `dial_timeout` |
+| both | `keepalive`, `nodelay` |
+
+Mux framing is identical in every profile, so the two servers may run different
+profiles without breaking the tunnel — but if you want the whole path on Turbo,
+change it on both.
+
 ## Tunnel Menu
 
 The per-tunnel screen is grouped by what each action does. `Pair code` only
@@ -133,10 +152,13 @@ appears on the IRAN side, since that is the only side that produces one.
 CONTROL     1 Start        2 Stop       3 Restart
 PAIRING     p Pair code                              (IRAN only)
 CONFIGURE   4 Ports        9 SOCKS5 proxy            (4 is forward mode only)
-            5 Tuning       6 Endpoint   7 Scheduled restart
+            5 Profile      6 Endpoint   7 Scheduled restart
 INSPECT     8 Show config  s Speed test L Logs + connections
 ADVANCED    e Edit config by hand       d Delete tunnel
 ```
+
+Advanced tuning — the transport switch and the per-value pins — is `[a]` inside
+the Profile screen.
 
 The main menu:
 
@@ -307,7 +329,7 @@ either upstream project.
 
 ```
 Eris Tunnel 2
-Version: 1.6.0
+Version: 1.7.0
 Support: @erisrttg
 ```
 
