@@ -16,7 +16,7 @@
 ```
 
 **Advanced Backhaul Reverse Tunnel Manager**
-`Version 1.5.1`
+`Version 1.6.0`
 Support: `@erisrttg`
 
 ---
@@ -78,7 +78,7 @@ USER
 - Multi-port forwarding and custom target mapping
 - Transports: `tcp`, `tcpmux`, `ws`, `wsmux`, `wss`, `wssmux`, `udp`
 - Performance profiles: Stable, Balanced, Low Ping, Turbo
-- Live dashboard and kernel-level connection inspection
+- Live terminal dashboard and kernel-level connection inspection
 - Latency and throughput testing, both passive and active
 - TLS certificate manager with Let's Encrypt via `acme.sh`
 - systemd services, boot startup and scheduled restart timers
@@ -132,10 +132,18 @@ appears on the IRAN side, since that is the only side that produces one.
 ```
 CONTROL     1 Start        2 Stop       3 Restart
 PAIRING     p Pair code                              (IRAN only)
-CONFIGURE   4 Ports        5 Tuning     6 Endpoint    7 Scheduled restart
-            9 SOCKS5 proxy                     (4 is forward mode only)
+CONFIGURE   4 Ports        9 SOCKS5 proxy            (4 is forward mode only)
+            5 Tuning       6 Endpoint   7 Scheduled restart
 INSPECT     8 Show config  s Speed test L Logs + connections
 ADVANCED    e Edit config by hand       d Delete tunnel
+```
+
+The main menu:
+
+```
+TUNNELS   1 New tunnel - IRAN    2 New tunnel - KHAREJ   3 Manage tunnels
+MONITOR   4 Dashboard            5 Diagnostics
+SYSTEM    6 Core                 u Update                x Uninstall
 ```
 
 ## SOCKS5 Proxy Mode
@@ -165,8 +173,25 @@ be moved between modes from `Manage tunnels -> [9] SOCKS5 proxy`.
 | Publicly bound | only IRAN's socks listener, and it always needs credentials |
 | Tunnel hop | `127.0.0.1:BRIDGE_PORT` on IRAN — nothing but the local proxy reaches it |
 | Proxy engine | `gost`, installed on demand from GitHub releases |
-| Credentials | kept in `proxy.env` (mode 600), never in the unit file |
+| Credentials | optional — you are asked, and asked for the values |
+| Where they live | `proxy.env` (mode 600), never in the unit file |
 | Transport | TCP only; SOCKS5 UDP ASSOCIATE is not carried |
+
+### Credentials are optional
+
+When you create a proxy tunnel it asks *"protect the proxy with a username and
+password?"*. Say yes and it asks which username and password you want; say no
+and it sets none. `[3] Credentials` on the proxy screen asks the same question
+again later, on either side. Pressing Enter at either prompt takes the generated
+suggestion.
+
+> **Running without credentials means anyone who can reach `PROXY_PORT` can use
+> the proxy**, and whatever they send leaves from your KHAREJ server's ip — which
+> is a good way to get that server blacklisted or terminated. The manager warns
+> you when you choose it and keeps the warning on the status screen. Only do it
+> when something else already restricts who can reach the port.
+
+Whatever you choose, both ends must match — the pair code carries it.
 
 Worth knowing:
 
@@ -262,6 +287,15 @@ systemctl start 'backhaul@*'
 
 Tunnel configs, `meta.conf` files and B1/B2 Pair Codes work unchanged.
 
+## No Web Dashboard
+
+Backhaul's built-in web interface (`sniffer` / `web_port`) is not offered by this
+manager, and generated configs pin it off so no HTTP listener is ever opened. If
+a tunnel from an older build still has one running, the manager spots it on the
+next start and offers to turn it off.
+
+The live dashboard on the main menu is a terminal view, and is unaffected.
+
 ## Upstream
 
 The tunnel core comes from **Musixal/Backhaul**.
@@ -273,7 +307,7 @@ either upstream project.
 
 ```
 Eris Tunnel 2
-Version: 1.5.1
+Version: 1.6.0
 Support: @erisrttg
 ```
 

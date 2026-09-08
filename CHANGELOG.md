@@ -3,6 +3,65 @@
 All notable changes to **Eris Tunnel 2** are recorded here.
 This project follows [Semantic Versioning](https://semver.org/).
 
+## [1.6.0] - 2026-09-08
+
+### Added
+
+- **Proxy credentials are now a question, not a rule.** Creating a proxy-mode
+  tunnel asks *"protect the proxy with a username and password?"*. Answer yes
+  and it asks for the username and the password you want; answer no and it sets
+  none at all. The same question is behind `[3] Credentials` on the proxy
+  screen, on both sides, so a running proxy can be opened or closed later.
+  Pressing Enter at either prompt accepts a generated suggestion.
+
+  Running without credentials means **anyone who can reach the proxy port can
+  use it**, and their traffic leaves from your KHAREJ server's ip. The manager
+  says so at the moment you choose it, and keeps saying so on the status
+  screen while it is off. That is the trade you are making, not a bug.
+
+- `sweep_web_dashboard` runs at startup: if a tunnel from an older build still
+  has Backhaul serving a web dashboard, it offers to regenerate the config and
+  restart that tunnel.
+
+### Changed
+
+- **Refreshed the look.** Double-ruled frames, a violet-to-pink logo gradient
+  with a violet frame colour, `▸`-marked menu items, `▌`-marked section
+  headers, and `✓ ✗ ▲ ▸` status glyphs in place of `+ x ! >`.
+
+- **Reworked the main menu.** Creating and managing tunnels comes first, the
+  core installer moved into a SYSTEM group, and maintenance moved onto letter
+  keys:
+
+  ```
+  TUNNELS   1 New tunnel - IRAN    2 New tunnel - KHAREJ   3 Manage tunnels
+  MONITOR   4 Dashboard            5 Diagnostics
+  SYSTEM    6 Core                 u Update                x Uninstall
+  ```
+
+- In the per-tunnel menu, `[9] SOCKS5 proxy` now sits next to `[4] Ports`,
+  since between them they decide what the tunnel actually does.
+
+- The pair code stays **B4**: empty credential fields are what "no
+  authentication" looks like on the wire, so a 1.5.1 side still pairs fine with
+  a 1.6.0 side whenever credentials are in use. A no-credentials code is only
+  understood from 1.6.0 onward.
+
+- A tunnel whose credentials were *asked for* but no longer validate loads with
+  proxy mode off rather than running an unintentionally open proxy. With
+  credentials deliberately off, no such check applies.
+
+### Removed
+
+- **The built-in web dashboard is gone.** The prompts, the `WEB_PORT` and
+  `SNIFFER` metadata, the status rows and the `sniffer_log` file all went with
+  it, and generated configs now pin `sniffer = false` / `web_port = 0` so
+  Backhaul never opens an HTTP listener. Existing tunnels are offered the
+  cleanup described above on the next start.
+
+  The terminal dashboard (main menu `[4]`) is untouched — it was never the web
+  one.
+
 ## [1.5.1] - 2026-09-08
 
 ### Added

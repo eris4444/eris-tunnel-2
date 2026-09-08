@@ -31,7 +31,7 @@
 #  ERIS-TUNNEL-2-SCRIPT
 # ==============================================================================
 
-SCRIPT_VER="1.5.1"
+SCRIPT_VER="1.6.0"
 DEV_ID="@erisrttg"
 
 GH_REPO="Musixal/Backhaul"
@@ -66,12 +66,12 @@ DEFAULT_CHANNEL="2048"
 DEFAULT_MUXCON="8"
 
 # ================================================================== UI ======
-R=$'\e[38;5;203m'; G=$'\e[38;5;114m'; Y=$'\e[38;5;221m'
-C=$'\e[38;5;81m';  M=$'\e[38;5;177m'; W=$'\e[1;97m'
-D=$'\e[38;5;244m'; N=$'\e[0m';        BD=$'\e[1m'
-L1=$'\e[38;5;33m'; L2=$'\e[38;5;39m'; L3=$'\e[38;5;45m'
-L4=$'\e[38;5;51m'; L5=$'\e[38;5;87m'; L6=$'\e[38;5;123m'
-BG_OK=$'\e[48;5;22m'; BG_ERR=$'\e[48;5;52m'; BG_WARN=$'\e[48;5;58m'
+R=$'\e[38;5;204m'; G=$'\e[38;5;114m'; Y=$'\e[38;5;215m'
+C=$'\e[38;5;141m'; M=$'\e[38;5;87m';  W=$'\e[1;97m'
+D=$'\e[38;5;245m'; N=$'\e[0m';        BD=$'\e[1m'
+L1=$'\e[38;5;99m';  L2=$'\e[38;5;105m'; L3=$'\e[38;5;141m'
+L4=$'\e[38;5;147m'; L5=$'\e[38;5;183m'; L6=$'\e[38;5;219m'
+BG_OK=$'\e[48;5;23m'; BG_ERR=$'\e[48;5;52m'; BG_WARN=$'\e[48;5;58m'
 UIW=62
 
 shopt -s extglob 2>/dev/null
@@ -92,38 +92,38 @@ vislen() {
 }
 rep() { local ch="$1" n="$2"; [ "${n:-0}" -gt 0 ] 2>/dev/null || return 0
         printf "${ch}%.0s" $(seq 1 "$n"); }
-top()   { printf '  %s╭%s╮%s\n' "$C" "$(rep '─' $((UIW+2)))" "$N"; }
-mid()   { printf '  %s├%s┤%s\n' "$C" "$(rep '─' $((UIW+2)))" "$N"; }
-bot()   { printf '  %s╰%s╯%s\n' "$C" "$(rep '─' $((UIW+2)))" "$N"; }
+top()   { printf '  %s╔%s╗%s\n' "$C" "$(rep '═' $((UIW+2)))" "$N"; }
+mid()   { printf '  %s╠%s╣%s\n' "$C" "$(rep '═' $((UIW+2)))" "$N"; }
+bot()   { printf '  %s╚%s╝%s\n' "$C" "$(rep '═' $((UIW+2)))" "$N"; }
 row()   { local t="$1" l p; l=$(vislen "$t"); p=$((UIW-l)); ((p<0))&&p=0
-          printf '  %s│%s %s%*s %s│%s\n' "$C" "$N" "$t" "$p" "" "$C" "$N"; }
+          printf '  %s║%s %s%*s %s║%s\n' "$C" "$N" "$t" "$p" "" "$C" "$N"; }
 blank() { row ""; }
-item()  { row "$(printf '%s%s%s  %s%-22s%s %s%s%s' "$Y" "[$1]" "$N" "$W" "$2" "$N" "$D" "${3:-}" "$N")"; }
+item()  { row "$(printf '%s%2s%s %s▸%s %s%-22s%s %s%s%s' "$Y$BD" "$1" "$N" "$C" "$N" "$W" "$2" "$N" "$D" "${3:-}" "$N")"; }
 kv()    { row "$(printf '%s%-13s%s %s' "$D" "$1" "$N" "$2")"; }
-sect()  { row "$(printf '%s%s%s' "$M$BD" "$1" "$N")"; }
+sect()  { row "$(printf '%s▌%s %s%s%s' "$C" "$N" "$M$BD" "$1" "$N")"; }
 badge() { printf '%s %s %s' "$2$BD" "$1" "$N"; }
 
-ok()   { printf '  %s+%s %s\n' "$G" "$N" "$*"; }
-bad()  { printf '  %sx%s %s\n' "$R" "$N" "$*"; }
-warn() { printf '  %s!%s %s\n' "$Y" "$N" "$*"; }
-info() { printf '  %s>%s %s\n' "$C" "$N" "$*"; }
+ok()   { printf '  %s✓%s %s\n' "$G" "$N" "$*"; }
+bad()  { printf '  %s✗%s %s\n' "$R" "$N" "$*"; }
+warn() { printf '  %s▲%s %s\n' "$Y" "$N" "$*"; }
+info() { printf '  %s▸%s %s\n' "$C" "$N" "$*"; }
 dim()  { printf '    %s%s%s\n' "$D" "$*" "$N"; }
-dot()  { case "$1" in active) printf '%s*%s' "$G" "$N" ;; failed) printf '%s*%s' "$R" "$N" ;;
-                     *) printf '%s*%s' "$D" "$N" ;; esac; }
+dot()  { case "$1" in active) printf '%s●%s' "$G" "$N" ;; failed) printf '%s●%s' "$R" "$N" ;;
+                     *) printf '%s○%s' "$D" "$N" ;; esac; }
 
 ask() {
   local p="$1" d="${2:-}" v
-  if [ -n "$d" ]; then read -r -p "$(printf '  %s>%s %s %s[%s]%s: ' "$C" "$N" "$p" "$D" "$d" "$N")" v
-  else read -r -p "$(printf '  %s>%s %s: ' "$C" "$N" "$p")" v; fi
+  if [ -n "$d" ]; then read -r -p "$(printf '  %s▸%s %s %s[%s]%s: ' "$C" "$N" "$p" "$D" "$d" "$N")" v
+  else read -r -p "$(printf '  %s▸%s %s: ' "$C" "$N" "$p")" v; fi
   ANS="${v:-$d}"
 }
 yesno() {
   local p="$1" d="$2" v
-  read -r -p "$(printf '  %s>%s %s %s[%s]%s: ' "$C" "$N" "$p" "$D" \
+  read -r -p "$(printf '  %s▸%s %s %s[%s]%s: ' "$C" "$N" "$p" "$D" \
       "$([ "$d" = y ] && echo 'Y/n' || echo 'y/N')" "$N")" v
   v="${v:-$d}"; [[ "$v" =~ ^[Yy]$ ]]
 }
-getkey() { local k; printf '  %s>%s Select: ' "$C" "$N"; read -rsn1 k
+getkey() { local k; printf '  %s▸%s Select: ' "$C" "$N"; read -rsn1 k
            [ -z "$k" ] && k="_"; printf '%s\n\n' "$k"; KEY="$k"; }
 pause()  { printf '\n  %spress any key%s' "$D" "$N"; read -rsn1 _; echo; }
 
@@ -140,13 +140,13 @@ header() {
   row "$(printf '%s██╔══╝  %s██╔══██╗%s██║ %s╚════██║%s' "$L2" "$L3" "$L4" "$L5" "$N")"
   row "$(printf '%s███████╗%s██║  ██║%s██║ %s███████║%s' "$L3" "$L4" "$L5" "$L6" "$N")"
   row "$(printf '%s╚══════╝╚═╝  ╚═╝╚═╝ ╚══════╝%s' "$D" "$N")"
-  row "$(printf '%sT%s U%s N%s N%s E%s L  2%s   %sbackhaul reverse tunnel%s' \
+  row "$(printf '%sT%s U%s N%s N%s E%s L  2%s   %s·  backhaul reverse tunnel%s' \
         "$L2" "$L3" "$L4" "$L5" "$L6" "$W$BD" "$N" "$D" "$N")"
   mid
   row "$(printf '%s %score %s%s   %sv%s%s   %s%s%s' \
         "$(core_badge)" "$D" "$N$W" "$(core_version_short)" "$D" "$SCRIPT_VER" "$N" "$M" "$DEV_ID" "$N")"
   bot
-  [ -n "${1:-}" ] && { echo; printf '  %s>%s %s%s%s\n' "$L4" "$N" "$W$BD" "$1" "$N"; }
+  [ -n "${1:-}" ] && { echo; printf '  %s▌%s %s%s%s\n' "$L4" "$N" "$W$BD" "$1" "$N"; }
   echo
 }
 
@@ -229,6 +229,29 @@ gen_token() {
   else tr -dc 'a-zA-Z0-9' </dev/urandom | head -c 24; fi
 }
 gen_proxy_user() { printf 'eris%s' "$(tr -dc 'a-z0-9' </dev/urandom | head -c 6)"; }
+# Asked for, never invented behind the operator's back. Enter accepts the
+# suggestion in brackets, so neither prompt can trap someone in a loop.
+ask_proxy_creds() {
+  local u p
+  while :; do
+    ask "proxy username" "${PROXY_USER:-$(gen_proxy_user)}"; u="$ANS"
+    valid_proxy_user "$u" && break
+    bad "username: 1-32 chars of A-Z a-z 0-9 _ -"
+  done
+  while :; do
+    ask "proxy password" "${PROXY_PASS:-$(gen_proxy_pass)}"; p="$ANS"
+    valid_proxy_pass "$p" && break
+    bad "password: 6-64 chars of A-Z a-z 0-9 . _ + -"
+  done
+  PROXY_USER="$u"; PROXY_PASS="$p"; PROXY_AUTH=true
+}
+proxy_auth_off() {
+  PROXY_AUTH=false; PROXY_USER=""; PROXY_PASS=""
+}
+warn_open_proxy() { # <port>
+  warn "no username or password - anyone who reaches :$1 can use this proxy"
+  dim "whatever they send leaves from your kharej server's ip"
+}
 gen_proxy_pass() {
   if command -v openssl >/dev/null 2>&1; then openssl rand -base64 48 | tr -dc 'a-zA-Z0-9' | head -c 18
   else tr -dc 'a-zA-Z0-9' </dev/urandom | head -c 18; fi
@@ -559,12 +582,13 @@ EOF
 }
 # IRAN listens for users and chains into the tunnel; KHAREJ is the exit.
 proxy_args() {
+  local a=""
+  [ "${PROXY_AUTH:-false}" = true ] && a="$PROXY_USER:$PROXY_PASS@"
   if [ "$ROLE" = server ]; then
-    printf -- '-L socks5://%s:%s@0.0.0.0:%s -F socks5://%s:%s@127.0.0.1:%s' \
-      "$PROXY_USER" "$PROXY_PASS" "$PROXY_PORT" \
-      "$PROXY_USER" "$PROXY_PASS" "$BRIDGE_PORT"
+    printf -- '-L socks5://%s0.0.0.0:%s -F socks5://%s127.0.0.1:%s' \
+      "$a" "$PROXY_PORT" "$a" "$BRIDGE_PORT"
   else
-    printf -- '-L socks5://%s:%s@127.0.0.1:%s' "$PROXY_USER" "$PROXY_PASS" "$EXIT_PORT"
+    printf -- '-L socks5://%s127.0.0.1:%s' "$a" "$EXIT_PORT"
   fi
 }
 proxy_env_write() { # <name>
@@ -585,12 +609,19 @@ proxy_up() { # <name>
   sleep 1
   [ "$(proxy_raw "$1")" = active ]
 }
-proxy_uri() { printf 'socks5://%s:%s@%s:%s' "$3" "$4" "$1" "$2"; }
-proxy_test() { # <host> <port> <user> <pass>
+proxy_uri() { # <host> <port>
+  if [ "${PROXY_AUTH:-false}" = true ]; then
+    printf 'socks5://%s:%s@%s:%s' "$PROXY_USER" "$PROXY_PASS" "$1" "$2"
+  else
+    printf 'socks5://%s:%s' "$1" "$2"
+  fi
+}
+proxy_test() { # <host> <port>
   command -v curl >/dev/null 2>&1 || { bad "curl is not installed"; return 1; }
   info "asking api.ipify.org which ip it sees through the proxy"
-  local out
-  out="$(curl -fsS --max-time 25 -x "socks5h://$3:$4@$1:$2" https://api.ipify.org 2>&1)"
+  local out px="socks5h://$1:$2"
+  [ "${PROXY_AUTH:-false}" = true ] && px="socks5h://$PROXY_USER:$PROXY_PASS@$1:$2"
+  out="$(curl -fsS --max-time 25 -x "$px" https://api.ipify.org 2>&1)"
   if [[ "$out" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
     ok "working - exit ip is $out"; return 0
   fi
@@ -984,9 +1015,9 @@ write_server_config() {
       echo "tls_cert = \"${TLS_CERT:-$dir/server.crt}\""
       echo "tls_key = \"${TLS_KEY:-$dir/server.key}\""
     fi
-    echo "sniffer = $SNIFFER"
-    echo "web_port = $WEB_PORT"
-    echo "sniffer_log = \"$dir/sniffer.json\""
+    # No web dashboard in this build: pinned off so backhaul never opens one.
+    echo "sniffer = false"
+    echo "web_port = 0"
     echo "log_level = \"$LOGLEVEL\""
     echo "ports = ["
     if [ "${MODE:-forward}" = proxy ]; then
@@ -1029,9 +1060,8 @@ write_client_config() {
       echo "mux_recievebuffer = $P_RECVBUF"
       echo "mux_streambuffer = $P_STREAMBUF"
     fi
-    echo "sniffer = $SNIFFER"
-    echo "web_port = $WEB_PORT"
-    echo "sniffer_log = \"$dir/sniffer.json\""
+    echo "sniffer = false"
+    echo "web_port = 0"
     echo "log_level = \"$LOGLEVEL\""
   } > "$dir/config.toml"
   chmod 600 "$dir/config.toml"
@@ -1070,14 +1100,13 @@ OV_MUXVER="${OV_MUXVER:-}"
 AGGRESSIVE="$AGGRESSIVE"
 ACCEPT_UDP="$ACCEPT_UDP"
 NODELAY="$NODELAY"
-SNIFFER="$SNIFFER"
-WEB_PORT="$WEB_PORT"
 EDGE_IP="$EDGE_IP"
 TLS_CERT="$TLS_CERT"
 TLS_KEY="$TLS_KEY"
 PEER_IP="$PEER_IP"
 PUB_IP="$PUB_IP"
 MODE="${MODE:-forward}"
+PROXY_AUTH="${PROXY_AUTH:-false}"
 PROXY_PORT="${PROXY_PORT:-}"
 BRIDGE_PORT="${BRIDGE_PORT:-}"
 EXIT_PORT="${EXIT_PORT:-}"
@@ -1093,8 +1122,8 @@ EOF
 META_KEYS="NAME ROLE PORT TOKEN TRANSPORT CHANNEL_SIZE MUX_CON POOL AGGRESSIVE \
 ACCEPT_UDP NODELAY PROFILE OV_POOL OV_CHANNEL OV_HEARTBEAT OV_KEEPALIVE OV_MUXCON \
 OV_AGGRESSIVE OV_RETRY OV_DIAL OV_NODELAY OV_FRAME OV_RECVBUF OV_STREAMBUF OV_MUXVER \
-SNIFFER WEB_PORT EDGE_IP PEER_IP PUB_IP TLS_CERT TLS_KEY LOGLEVEL RESTART_EVERY \
-MODE PROXY_PORT BRIDGE_PORT EXIT_PORT PROXY_USER PROXY_PASS"
+EDGE_IP PEER_IP PUB_IP TLS_CERT TLS_KEY LOGLEVEL RESTART_EVERY \
+MODE PROXY_AUTH PROXY_PORT BRIDGE_PORT EXIT_PORT PROXY_USER PROXY_PASS"
 
 meta_set() { # <tunnel> <key> <value>
   local f="$TUN_DIR/$1/meta.conf"
@@ -1112,9 +1141,10 @@ load_meta() {
   OV_POOL=""; OV_CHANNEL=""; OV_HEARTBEAT=""; OV_KEEPALIVE=""; OV_MUXCON=""
   OV_AGGRESSIVE=""; OV_RETRY=""; OV_DIAL=""; OV_NODELAY=""
   OV_FRAME=""; OV_RECVBUF=""; OV_STREAMBUF=""; OV_MUXVER=""
-  SNIFFER="false"; WEB_PORT="0"; EDGE_IP=""; PEER_IP=""; PUB_IP=""
+  EDGE_IP=""; PEER_IP=""; PUB_IP=""
   TLS_CERT=""; TLS_KEY=""
-  MODE="forward"; PROXY_PORT=""; BRIDGE_PORT=""; EXIT_PORT=""
+  MODE="forward"; PROXY_AUTH="false"
+  PROXY_PORT=""; BRIDGE_PORT=""; EXIT_PORT=""
   PROXY_USER=""; PROXY_PASS=""
   LOGLEVEL="info"; RESTART_EVERY="off"
   # meta.conf is never sourced: a value that arrived in a pair code would then
@@ -1134,13 +1164,20 @@ load_meta() {
   # every load instead of trusting what is on disk. A tunnel that does not have
   # everything proxy mode needs is loaded as a plain forward, never half of one.
   valid_mode "$MODE" || MODE=forward
+  [ "$PROXY_AUTH" = true ] || PROXY_AUTH=false
   valid_port "$PROXY_PORT"  || PROXY_PORT=""
   valid_port "$BRIDGE_PORT" || BRIDGE_PORT=""
   valid_port "$EXIT_PORT"   || EXIT_PORT=""
   valid_proxy_user "$PROXY_USER" || PROXY_USER=""
   valid_proxy_pass "$PROXY_PASS" || PROXY_PASS=""
+  [ "$PROXY_AUTH" = false ] && { PROXY_USER=""; PROXY_PASS=""; }
   if [ "$MODE" = proxy ]; then
-    [ -n "$PROXY_USER" ] && [ -n "$PROXY_PASS" ] && [ -n "$EXIT_PORT" ] || MODE=forward
+    [ -n "$EXIT_PORT" ] || MODE=forward
+    # Credentials were asked for but did not survive validation. Refuse to run
+    # rather than quietly opening the proxy to everyone.
+    if [ "$PROXY_AUTH" = true ] && { [ -z "$PROXY_USER" ] || [ -z "$PROXY_PASS" ]; }; then
+      MODE=forward
+    fi
     if [ "$MODE" = proxy ] && [ "$ROLE" = server ]; then
       [ -n "$PROXY_PORT" ] && [ -n "$BRIDGE_PORT" ] || MODE=forward
     fi
@@ -1155,13 +1192,14 @@ load_meta() {
   local _k
   for _k in PROFILE OV_POOL OV_CHANNEL OV_HEARTBEAT OV_KEEPALIVE OV_MUXCON \
             OV_AGGRESSIVE OV_RETRY OV_DIAL OV_NODELAY OV_FRAME OV_RECVBUF \
-            OV_STREAMBUF OV_MUXVER MODE PROXY_PORT BRIDGE_PORT EXIT_PORT \
-            PROXY_USER PROXY_PASS; do
+            OV_STREAMBUF OV_MUXVER MODE PROXY_AUTH PROXY_PORT BRIDGE_PORT \
+            EXIT_PORT PROXY_USER PROXY_PASS; do
     grep -q "^$_k=" "$dir/meta.conf" 2>/dev/null && continue
     case "$_k" in
-      PROFILE) printf 'PROFILE="%s"\n' "$PROFILE" >> "$dir/meta.conf" ;;
-      MODE)    printf 'MODE="forward"\n' >> "$dir/meta.conf" ;;
-      *)       printf '%s=""\n' "$_k" >> "$dir/meta.conf" ;;
+      PROFILE)    printf 'PROFILE="%s"\n' "$PROFILE" >> "$dir/meta.conf" ;;
+      MODE)       printf 'MODE="forward"\n' >> "$dir/meta.conf" ;;
+      PROXY_AUTH) printf 'PROXY_AUTH="false"\n' >> "$dir/meta.conf" ;;
+      *)          printf '%s=""\n' "$_k" >> "$dir/meta.conf" ;;
     esac
   done
   return 0
@@ -1210,7 +1248,10 @@ make_pair_code() {
   local md=f ex="" pp="" pu="" ps=""
   if [ "${MODE:-forward}" = proxy ]; then
     md=p; ex="${EXIT_PORT:-}"; pp="${PROXY_PORT:-}"
-    pu="${PROXY_USER:-}"; ps="${PROXY_PASS:-}"
+    # Empty credentials are what "no authentication" looks like on the wire.
+    if [ "${PROXY_AUTH:-false}" = true ]; then
+      pu="${PROXY_USER:-}"; ps="${PROXY_PASS:-}"
+    fi
   fi
   local p="B4|$PUB_IP|$PORT|$TOKEN|$(tr_idx "$TRANSPORT")|${PROFILE:-balanced}|${RESTART_EVERY:-off}|$(ports_csv "$1")|$md|$ex|$pp|$pu|$ps"
   printf 'ETN-%s' "$(printf '%s' "$p" | b64enc)"
@@ -1222,6 +1263,7 @@ parse_pair_code() {
   PC_IP=""; PC_PORT=""; PC_TOKEN=""; PC_TR=""; PC_POOL=""; PC_PROFILE="balanced"
   PC_RESTART="off"; PC_PORTS=""
   PC_MODE="forward"; PC_EXIT=""; PC_PPORT=""; PC_PUSER=""; PC_PPASS=""
+  PC_PAUTH=false
   md=f
   if [[ "$raw" == B4\|* ]]; then
     IFS='|' read -r ver PC_IP PC_PORT PC_TOKEN ti PC_PROFILE PC_RESTART PC_PORTS \
@@ -1244,11 +1286,16 @@ parse_pair_code() {
   if [ "$md" = p ]; then
     PC_MODE=proxy
     valid_port "$PC_EXIT" || return 1
-    valid_proxy_user "$PC_PUSER" || return 1
-    valid_proxy_pass "$PC_PPASS" || return 1
     [ -z "$PC_PPORT" ] || valid_port "$PC_PPORT" || return 1
+    if [ -n "$PC_PUSER$PC_PPASS" ]; then
+      valid_proxy_user "$PC_PUSER" || return 1
+      valid_proxy_pass "$PC_PPASS" || return 1
+      PC_PAUTH=true
+    else
+      PC_PAUTH=false; PC_PUSER=""; PC_PPASS=""
+    fi
   else
-    PC_MODE=forward; PC_EXIT=""; PC_PPORT=""; PC_PUSER=""; PC_PPASS=""
+    PC_MODE=forward; PC_EXIT=""; PC_PPORT=""; PC_PUSER=""; PC_PPASS=""; PC_PAUTH=false
   fi
   valid_host "$PC_IP" && valid_port "$PC_PORT"
 }
@@ -1305,6 +1352,35 @@ on_interrupt() {
     printf '  %s!%s cancelled\n' "$Y" "$N"
   fi
   exit 130
+}
+
+# 1.6.0 dropped the built-in web dashboard. A tunnel created by an earlier build
+# can still have backhaul serving one, and nothing here would ever turn it off.
+sweep_web_dashboard() {
+  local n stale=()
+  while read -r n; do
+    [ -n "$n" ] || continue
+    [ -f "$TUN_DIR/$n/config.toml" ] || continue
+    grep -qE '^web_port = [1-9]' "$TUN_DIR/$n/config.toml" 2>/dev/null && stale+=("$n")
+  done <<<"$(tunnel_names)"
+  [ ${#stale[@]} -eq 0 ] && return 0
+  echo
+  top; sect "WEB DASHBOARD"
+  row "$(printf '%sthis version does not offer a web dashboard any more,%s' "$D" "$N")"
+  row "$(printf '%sbut backhaul is still serving one for:%s' "$D" "$N")"
+  blank
+  for n in "${stale[@]}"; do row "$(printf '%s%s%s' "$Y" "$n" "$N")"; done
+  bot; echo
+  if yesno "turn it off? this regenerates their config and restarts them" y; then
+    for n in "${stale[@]}"; do
+      if regen_config "$n"; then
+        systemctl restart "backhaul@$n" >/dev/null 2>&1
+        ok "$n - dashboard off"
+      else bad "$n - config generation failed"; fi
+    done
+    pause
+  fi
+  return 0
 }
 
 # Catches leftovers from a hard kill, a dropped ssh session or an older build.
@@ -1462,7 +1538,7 @@ read_ports_into() {
 # ============================================================ CREATE IRAN ==
 screen_new_iran() {
   header "NEW TUNNEL - IRAN (server side)"
-  [ -x "$BIN_PATH" ] || { bad "core not installed - main menu [1]"; pause; return; }
+  [ -x "$BIN_PATH" ] || { bad "core not installed - main menu [6]"; pause; return; }
   top; sect "ROLE CHECK"
   row "$(printf '%sIRAN is the [server]. it binds the port and exposes%s' "$D" "$N")"
   row "$(printf '%sthe ports your users connect to. the pair code is%s' "$D" "$N")"
@@ -1548,14 +1624,20 @@ screen_new_iran() {
     while { [ "$BRIDGE_PORT" = "$PROXY_PORT" ] || [ "$BRIDGE_PORT" = "$PORT" ]; } && [ "$_g" -lt 5 ]; do
       BRIDGE_PORT="$(pick_free_port $((BRIDGE_PORT+1)))"; _g=$((_g+1))
     done
-    PROXY_USER="$(gen_proxy_user)"; PROXY_PASS="$(gen_proxy_pass)"
+    echo
+    if yesno "protect the proxy with a username and password?" y; then
+      ask_proxy_creds
+    else
+      proxy_auth_off
+      warn_open_proxy "$PROXY_PORT"
+    fi
     ok "users will connect to :$PROXY_PORT"
     dim "bridge 127.0.0.1:$BRIDGE_PORT  ->  kharej 127.0.0.1:$EXIT_PORT"
   fi
 
   TRANSPORT="$DEFAULT_TRANSPORT"; CHANNEL_SIZE="$DEFAULT_CHANNEL"; MUX_CON="$DEFAULT_MUXCON"
   POOL="$DEFAULT_POOL"; AGGRESSIVE=false; ACCEPT_UDP=false; NODELAY=true
-  SNIFFER=false; WEB_PORT=0; EDGE_IP=""
+  EDGE_IP=""
   echo
   PROFILE="$(pick_profile)"
   if yesno "change the transport?" n; then
@@ -1570,11 +1652,6 @@ screen_new_iran() {
     TRANSPORT="$DEFAULT_TRANSPORT"
   fi
   RESTART_EVERY="$(pick_restart)"
-
-  if yesno "enable the built-in web dashboard?" n; then
-    ask "dashboard port" "2060"
-    valid_port "$ANS" && { WEB_PORT="$ANS"; SNIFFER=true; }
-  fi
 
   valid_profile "$PROFILE" || PROFILE=balanced
   TOKEN="$(gen_token)"
@@ -1596,14 +1673,14 @@ screen_new_iran() {
   kv "listen"    "$W:$PORT$N"
   kv "transport" "$W$TRANSPORT$N $D- $(transport_hint "$TRANSPORT")$N"
   if [ "$MODE" = proxy ]; then
-    kv "users"   "$W$(proxy_uri "$PUB_IP" "$PROXY_PORT" "$PROXY_USER" "$PROXY_PASS")$N"
+    kv "users"   "$W$(proxy_uri "$PUB_IP" "$PROXY_PORT")$N"
+    kv "auth"    "$([ "$PROXY_AUTH" = true ] && printf '%s%s / %s%s' "$W" "$PROXY_USER" "$PROXY_PASS" "$N" || printf '%snone - open proxy%s' "$Y" "$N")"
     kv "bridge"  "${D}127.0.0.1:$BRIDGE_PORT -> kharej 127.0.0.1:$EXIT_PORT$N"
   else
     kv "ports"   "$W$(pretty_ports "$(ports_csv "$TUN_DIR/$name")")$N"
   fi
   kv "restart"   "$([ "$RESTART_EVERY" = off ] && printf '%soff%s' "$D" "$N" || printf '%severy %s%s' "$G" "$RESTART_EVERY" "$N")"
   [ -n "$TLS_CERT" ] && kv "certificate" "$W$(cert_cn "$TLS_CERT")$N $D- $(cert_days_left "$TLS_CERT")d left$N"
-  [ "$WEB_PORT" != 0 ] && kv "dashboard" "${W}http://$PUB_IP:$WEB_PORT$N"
   bot; echo
   start_tunnel "$name"
   set_restart_timer "$name" "$RESTART_EVERY"
@@ -1628,7 +1705,7 @@ screen_new_iran() {
 # ========================================================== CREATE KHAREJ ==
 screen_new_kharej() {
   header "NEW TUNNEL - KHAREJ (client side)"
-  [ -x "$BIN_PATH" ] || { bad "core not installed - main menu [1]"; pause; return; }
+  [ -x "$BIN_PATH" ] || { bad "core not installed - main menu [6]"; pause; return; }
   top; sect "ROLE CHECK"
   row "$(printf '%sKHAREJ is the [client]. it dials out to iran and%s' "$D" "$N")"
   row "$(printf '%sneeds no inbound port. your panel lives here.%s' "$D" "$N")"
@@ -1651,7 +1728,7 @@ screen_new_kharej() {
     ask "tunnel port" "$DEFAULT_PORT"; PC_PORT="$ANS"
     ask "token";       PC_TOKEN="$ANS"
     PC_TR="$(pick_transport)"; PC_PROFILE="$(pick_profile)"; PC_RESTART=off; PC_PORTS=""
-    PC_MODE=forward; PC_EXIT=""; PC_PPORT=""; PC_PUSER=""; PC_PPASS=""
+    PC_MODE=forward; PC_EXIT=""; PC_PPORT=""; PC_PUSER=""; PC_PPASS=""; PC_PAUTH=false
     valid_host "$PC_IP" && valid_port "$PC_PORT" || { bad "invalid ip or port"; pause; return; }
     valid_token "$PC_TOKEN" || { bad "token must be 8-128 chars of A-Z a-z 0-9 + / = . _ @ : -"; pause; return; }
   fi
@@ -1663,6 +1740,7 @@ screen_new_kharej() {
   kv "profile"   "$W$(profile_name "$PC_PROFILE")$N $D$(profile_hint "$PC_PROFILE")$N"
   if [ "$PC_MODE" = proxy ]; then
     kv "exit here" "${W}127.0.0.1:$PC_EXIT$N $D- this server is the way out$N"
+    kv "proxy auth" "$([ "$PC_PAUTH" = true ] && printf '%s%s%s' "$W" "$PC_PUSER" "$N" || printf '%snone%s' "$Y" "$N")"
   else
     kv "ports"   "$W$(pretty_ports "$PC_PORTS")$N"
   fi
@@ -1676,12 +1754,6 @@ screen_new_kharej() {
       if valid_ip4 "$ANS"; then EDGE_IP="$ANS"; else bad "not a valid ip - ignored"; fi
     fi ;;
   esac
-  SNIFFER=false; WEB_PORT=0
-  if yesno "enable the built-in web dashboard?" n; then
-    ask "dashboard port" "2060"
-    valid_port "$ANS" && { WEB_PORT="$ANS"; SNIFFER=true; }
-  fi
-
   mkdir -p "$TUN_DIR/$name"; PARTIAL_TUNNEL="$name"
   : > "$TUN_DIR/$name/ports.list"
   NAME="$name"; ROLE=client; PORT="$PC_PORT"; TOKEN="$PC_TOKEN"; TRANSPORT="$PC_TR"
@@ -1690,7 +1762,7 @@ screen_new_kharej() {
   AGGRESSIVE=false; ACCEPT_UDP=false; NODELAY=true; RESTART_EVERY="$PC_RESTART"
   TLS_CERT=""; TLS_KEY=""
   MODE="$PC_MODE"; PROXY_PORT="$PC_PPORT"; BRIDGE_PORT=""; EXIT_PORT="$PC_EXIT"
-  PROXY_USER="$PC_PUSER"; PROXY_PASS="$PC_PPASS"
+  PROXY_AUTH="$PC_PAUTH"; PROXY_USER="$PC_PUSER"; PROXY_PASS="$PC_PPASS"
 
   write_meta "$TUN_DIR/$name"
   PARTIAL_TUNNEL=""
@@ -1714,7 +1786,7 @@ screen_new_kharej() {
       if proxy_up "$name"; then
         ok "socks5 exit up on 127.0.0.1:$EXIT_PORT via gost $(gost_version)"
         [ -n "$PROXY_PORT" ] && \
-          dim "your users: $(proxy_uri "$PEER_IP" "$PROXY_PORT" "$PROXY_USER" "$PROXY_PASS")"
+          dim "your users: $(proxy_uri "$PEER_IP" "$PROXY_PORT")"
       else
         bad "the exit service did not start"
         dim "journalctl -u eris-proxy@$name -n 30"
@@ -1850,20 +1922,26 @@ screen_proxy() {
       kv "service" "$([ "$_ps" = active ] && badge ACTIVE "$BG_OK$W" || badge "${_ps:-inactive}" "$BG_ERR$W")"
     fi
     kv "gost"     "$W$(gost_version)$N"
-    kv "user"     "$([ -n "$PROXY_USER" ] && printf '%s%s%s' "$W" "$PROXY_USER" "$N" || printf '%s-%s' "$D" "$N")"
-    kv "password" "$([ -n "$PROXY_PASS" ] && printf '%s%s%s' "$W" "$PROXY_PASS" "$N" || printf '%s-%s' "$D" "$N")"
+    if [ "$PROXY_AUTH" = true ]; then
+      kv "user"     "$W$PROXY_USER$N"
+      kv "password" "$W$PROXY_PASS$N"
+    else
+      kv "auth" "$(badge "NONE" "$BG_WARN$W")"
+      [ "$MODE" = proxy ] && [ "$ROLE" = server ] && \
+        row "$(printf '%sanyone who reaches :%s can use this proxy%s' "$Y" "${PROXY_PORT:-?}" "$N")"
+    fi
     mid
     if [ "$ROLE" = server ]; then
       item 1 "$([ "$MODE" = proxy ] && echo "Switch to port forward" || echo "Switch to socks5 proxy")" ""
       item 2 "Change proxy port" "the port your users use"
-      item 3 "New credentials" "re-pair kharej afterwards"
+      item 3 "Credentials" "$([ "$PROXY_AUTH" = true ] && echo "on - $PROXY_USER" || echo "off - open proxy")"
       item 4 "Restart the proxy" ""
       item 5 "Client settings" "what to paste into an app"
       item 6 "Change exit port" "advanced - must match kharej"
     else
       item 1 "$([ "$MODE" = proxy ] && echo "Turn the exit off" || echo "Turn the exit on")" ""
       item 2 "Change exit port" "must match what iran sends to"
-      item 3 "Set credentials" "copy them from the iran side"
+      item 3 "Credentials" "$([ "$PROXY_AUTH" = true ] && echo "on - $PROXY_USER" || echo "off - must match iran")"
       item 4 "Restart the exit" ""
       item 5 "Client settings" "what to paste into an app"
     fi
@@ -1892,14 +1970,19 @@ screen_proxy() {
              while { [ "$bp" = "$pp" ] || [ "$bp" = "$PORT" ]; } && [ "$_g" -lt 5 ]; do
                bp="$(pick_free_port $((bp+1)))"; _g=$((_g+1))
              done
-             [ -n "$EXIT_PORT" ]   || EXIT_PORT="$DEFAULT_EXIT_PORT"
-             [ -n "$PROXY_USER" ]  || PROXY_USER="$(gen_proxy_user)"
-             [ -n "$PROXY_PASS" ]  || PROXY_PASS="$(gen_proxy_pass)"
+             [ -n "$EXIT_PORT" ] || EXIT_PORT="$DEFAULT_EXIT_PORT"
+             if yesno "protect the proxy with a username and password?" \
+                      "$([ "$PROXY_AUTH" = true ] && echo y || echo n)"; then
+               ask_proxy_creds
+             else
+               proxy_auth_off; warn_open_proxy "$pp"
+             fi
              gost_ensure || { pause; continue; }
              PROXY_PORT="$pp"; BRIDGE_PORT="$bp"
              meta_set "$name" PROXY_PORT "$pp"
              meta_set "$name" BRIDGE_PORT "$bp"
              meta_set "$name" EXIT_PORT "$EXIT_PORT"
+             meta_set "$name" PROXY_AUTH "$PROXY_AUTH"
              meta_set "$name" PROXY_USER "$PROXY_USER"
              meta_set "$name" PROXY_PASS "$PROXY_PASS"
              meta_set "$name" MODE proxy
@@ -1920,13 +2003,16 @@ screen_proxy() {
              local ep
              ask "exit port on this server" "${EXIT_PORT:-$DEFAULT_EXIT_PORT}"; ep="$ANS"
              valid_port "$ep" || { bad "invalid port"; pause; continue; }
-             if [ -z "$PROXY_USER" ]; then ask "proxy user" "$(gen_proxy_user)"; PROXY_USER="$ANS"; fi
-             valid_proxy_user "$PROXY_USER" || { bad "user: 1-32 chars of A-Z a-z 0-9 _ -"; pause; continue; }
-             if [ -z "$PROXY_PASS" ]; then ask "proxy password" "$(gen_proxy_pass)"; PROXY_PASS="$ANS"; fi
-             valid_proxy_pass "$PROXY_PASS" || { bad "password: 6-64 chars of A-Z a-z 0-9 . _ + -"; pause; continue; }
+             if yesno "does the iran side use a username and password?" \
+                      "$([ "$PROXY_AUTH" = true ] && echo y || echo n)"; then
+               ask_proxy_creds
+             else
+               proxy_auth_off
+             fi
              gost_ensure || { pause; continue; }
              EXIT_PORT="$ep"
              meta_set "$name" EXIT_PORT "$ep"
+             meta_set "$name" PROXY_AUTH "$PROXY_AUTH"
              meta_set "$name" PROXY_USER "$PROXY_USER"
              meta_set "$name" PROXY_PASS "$PROXY_PASS"
              meta_set "$name" MODE proxy
@@ -1964,31 +2050,25 @@ screen_proxy() {
            warn "change it to the same value on the iran side, or re-pair"
          fi
          pause ;;
-      3) if [ "$ROLE" = server ]; then
-           yesno "generate a new user and password?" y || { pause; continue; }
-           PROXY_USER="$(gen_proxy_user)"; PROXY_PASS="$(gen_proxy_pass)"
-           meta_set "$name" PROXY_USER "$PROXY_USER"
-           meta_set "$name" PROXY_PASS "$PROXY_PASS"
+      3) if yesno "require a username and password on this proxy?" \
+                  "$([ "$PROXY_AUTH" = true ] && echo y || echo n)"; then
+           ask_proxy_creds
+         else
+           proxy_auth_off
+           [ "$ROLE" = server ] && warn_open_proxy "${PROXY_PORT:-?}" \
+             || warn "the exit will accept anything the tunnel hands it"
+         fi
+         meta_set "$name" PROXY_AUTH "$PROXY_AUTH"
+         meta_set "$name" PROXY_USER "$PROXY_USER"
+         meta_set "$name" PROXY_PASS "$PROXY_PASS"
+         if [ "$MODE" = proxy ]; then
+           proxy_env_write "$name"
+           proxy_up "$name" && ok "applied" || bad "the service did not restart"
+         else ok "saved"; fi
+         if [ "$ROLE" = server ]; then
            load_meta "$name"
            make_pair_code "$dir" > "$dir/pair.code"; chmod 600 "$dir/pair.code"
-           if [ "$MODE" = proxy ]; then
-             proxy_env_write "$name"
-             proxy_up "$name" && ok "new credentials are live" || bad "the proxy did not restart"
-           else ok "new credentials stored"; fi
-           warn "kharej still uses the old ones - re-pair it or set them there by hand"
-         else
-           ask "proxy user" "${PROXY_USER:-$(gen_proxy_user)}"
-           valid_proxy_user "$ANS" || { bad "user: 1-32 chars of A-Z a-z 0-9 _ -"; pause; continue; }
-           PROXY_USER="$ANS"
-           ask "proxy password" "${PROXY_PASS:-$(gen_proxy_pass)}"
-           valid_proxy_pass "$ANS" || { bad "password: 6-64 chars of A-Z a-z 0-9 . _ + -"; pause; continue; }
-           PROXY_PASS="$ANS"
-           meta_set "$name" PROXY_USER "$PROXY_USER"
-           meta_set "$name" PROXY_PASS "$PROXY_PASS"
-           if [ "$MODE" = proxy ]; then
-             proxy_env_write "$name"
-             proxy_up "$name" && ok "credentials applied" || bad "the exit did not start"
-           else ok "saved"; fi
+           warn "kharej still uses the old setting - re-pair it or match it by hand"
          fi
          pause ;;
       4) [ "$MODE" = proxy ] || { bad "proxy mode is off"; pause; continue; }
@@ -1997,17 +2077,21 @@ screen_proxy() {
          pause ;;
       5) local h
          [ "$ROLE" = server ] && h="$PUB_IP" || h="$PEER_IP"
-         if [ -z "$PROXY_PORT" ] || [ -z "$PROXY_USER" ] || [ -z "$PROXY_PASS" ]; then
+         if [ -z "$PROXY_PORT" ]; then
            bad "nothing to show yet - turn proxy mode on first"; pause; continue
          fi
          echo; top; sect "CLIENT SETTINGS"; blank
          kv "type"     "${W}SOCKS5$N"
          kv "host"     "$W${h:-<iran ip>}$N"
          kv "port"     "$W$PROXY_PORT$N"
-         kv "user"     "$W$PROXY_USER$N"
-         kv "password" "$W$PROXY_PASS$N"
+         if [ "$PROXY_AUTH" = true ]; then
+           kv "user"     "$W$PROXY_USER$N"
+           kv "password" "$W$PROXY_PASS$N"
+         else
+           kv "auth"     "${D}none - leave username and password empty$N"
+         fi
          blank
-         row "$(printf '%s%s%s' "$W" "$(proxy_uri "${h:-<iran-ip>}" "$PROXY_PORT" "$PROXY_USER" "$PROXY_PASS")" "$N")"
+         row "$(printf '%s%s%s' "$W" "$(proxy_uri "${h:-<iran-ip>}" "$PROXY_PORT")" "$N")"
          bot; echo
          dim "tcp only - socks5 udp associate is not carried over the tunnel"
          pause ;;
@@ -2026,11 +2110,11 @@ screen_proxy() {
          pause ;;
       t|T) local tp
          [ "$ROLE" = server ] && tp="$PROXY_PORT" || tp="$EXIT_PORT"
-         if [ "$MODE" != proxy ] || [ -z "$tp" ] || [ -z "$PROXY_USER" ]; then
+         if [ "$MODE" != proxy ] || [ -z "$tp" ]; then
            bad "turn proxy mode on first"; pause; continue
          fi
          echo
-         proxy_test 127.0.0.1 "$tp" "$PROXY_USER" "$PROXY_PASS"
+         proxy_test 127.0.0.1 "$tp"
          [ "$ROLE" = server ] && dim "that went through the tunnel, so the ip should be the kharej one" \
            || dim "this is the exit itself, so the ip is this server's"
          pause ;;
@@ -2207,7 +2291,6 @@ screen_manage() {
       local _d; _d="$(cert_days_left "$TLS_CERT")"
       kv "certificate" "$W$(cert_cn "$TLS_CERT")$N $([ "${_d:-0}" -lt 15 ] 2>/dev/null && printf '%s' "$R" || printf '%s' "$D")${_d}d left$N"
     fi
-    [ "$WEB_PORT" != 0 ] && kv "dashboard" "${W}port $WEB_PORT$N"
     if [ "$MODE" = proxy ]; then
       local _ps; _ps="$(proxy_raw "$name")"
       if [ "$ROLE" = server ]; then
@@ -2224,10 +2307,10 @@ screen_manage() {
     fi
     mid; sect "CONFIGURE"
     [ "$ROLE" = server ] && [ "$MODE" != proxy ] && item 4 "Ports" "user-facing ports"
+    item 9 "SOCKS5 proxy" "$([ "$MODE" = proxy ] && echo "on - $([ "$ROLE" = server ] && echo "port $PROXY_PORT" || echo "exit $EXIT_PORT")" || echo "off - hand the tunnel out as a proxy")"
     item 5 "Tuning" "transport, profile, advanced"
     item 6 "Endpoint" "port or peer ip"
     item 7 "Scheduled restart" ""
-    item 9 "SOCKS5 proxy" "$([ "$MODE" = proxy ] && echo "on - $([ "$ROLE" = server ] && echo "port $PROXY_PORT" || echo "exit $EXIT_PORT")" || echo "off - hand the tunnel out as a proxy")"
     mid; sect "INSPECT"
     item 8 "Show config" ""
     item s "Speed test" "latency + throughput"
@@ -2934,23 +3017,23 @@ main_menu() {
     top
     row "$(printf '%s%s%s tunnels   %s%s%s running   %s%s%s' "$W$BD" "$tot" "$N" "$G$BD" "$run" "$N" "$D" \
         "$([ -x "$BIN_PATH" ] && echo 'core ready' || echo 'core missing')" "$N")"
-    mid; sect "SETUP"
-    item 1 "Core" "install / update backhaul"
-    item 2 "New tunnel - IRAN" "server, makes pair code"
-    item 3 "New tunnel - KHAREJ" "client, takes pair code"
-    mid; sect "OPERATE"
-    item 4 "Manage tunnels" "ports, transport, endpoint"
-    item 5 "Dashboard" ""
-    item 6 "Diagnostics" "logs and tests"
-    mid; sect "MAINTENANCE"
-    item 7 "Update" ""
-    item 8 "Uninstall" ""
+    mid; sect "TUNNELS"
+    item 1 "New tunnel - IRAN" "server side, makes the pair code"
+    item 2 "New tunnel - KHAREJ" "client side, takes the pair code"
+    item 3 "Manage tunnels" "ports, proxy, transport, endpoint"
+    mid; sect "MONITOR"
+    item 4 "Dashboard" "live view of every tunnel"
+    item 5 "Diagnostics" "logs, health check, speed tests"
+    mid; sect "SYSTEM"
+    item 6 "Core" "install / update backhaul"
+    item u "Update" "the manager itself"
+    item x "Uninstall" ""
     item 0 "Exit" ""
     bot; echo; getkey
     case "$KEY" in
-      1) screen_core ;;      2) screen_new_iran ;;   3) screen_new_kharej ;;
-      4) screen_manage ;;    5) screen_dashboard ;;  6) screen_diag ;;
-      7) screen_update ;;    8) screen_uninstall ;;
+      1) screen_new_iran ;;  2) screen_new_kharej ;; 3) screen_manage ;;
+      4) screen_dashboard ;; 5) screen_diag ;;       6) screen_core ;;
+      u|U) screen_update ;;  x|X) screen_uninstall ;;
       0|q|Q) clear; printf '  %sEris Tunnel 2%s  %s%s%s\n\n' "$C" "$N" "$D" "$DEV_ID" "$N"; exit 0 ;;
     esac
   done
@@ -2962,5 +3045,6 @@ ensure_dirs
 trap on_interrupt INT TERM
 purge_legacy_socks
 sweep_partials
+sweep_web_dashboard
 ensure_units
 main_menu
