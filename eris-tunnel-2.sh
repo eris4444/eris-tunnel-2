@@ -9,10 +9,16 @@
 #    KHAREJ = [client]  dials out to Iran, holds the real service
 #  So the pair code is generated on IRAN and pasted on KHAREJ.
 #
+#  SOCKS5 mode - the tunnel handed out as an outbound proxy:
+#    app -> socks5 on IRAN:public_port -> tunnel -> 127.0.0.1:socks_port on
+#    KHAREJ -> internet.  The exit ip a site sees is the KHAREJ one.  The
+#    socks server itself runs on KHAREJ as eris-socks@<tunnel>, bound to
+#    loopback so the tunnel is the only way in, and always with credentials.
+#
 #  ERIS-TUNNEL-2-SCRIPT
 # ==============================================================================
 
-SCRIPT_VER="1.0.2"
+SCRIPT_VER="1.5.1"
 DEV_ID="@erisrttg"
 
 GH_REPO="Musixal/Backhaul"
@@ -25,6 +31,11 @@ RS_UNIT="/etc/systemd/system/backhaul-restart@.service"
 RS_TIMER="/etc/systemd/system/backhaul-restart@.timer"
 CORE_VER_FILE="$BASE_DIR/core.version"
 UPDATE_URL_FILE="$BASE_DIR/update.url"
+SOCKS_UNIT="/etc/systemd/system/eris-socks@.service"
+SOCKS_PROV_FILE="$BASE_DIR/socks.provider"
+GOST_REPO="go-gost/gost"
+GOST_BIN="/usr/local/bin/eris-gost"
+DEFAULT_SOCKS_PORT=1080
 SELF_PATH="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "$0")"
 
 # When started by an installer invoked as `curl ... | bash`, stdin is the curl
@@ -146,6 +157,11 @@ valid_host() {
 # Anything that ends up inside meta.conf or a shell word must survive this.
 valid_token() { [[ "$1" =~ ^[A-Za-z0-9+/=._@:-]{8,128}$ ]]; }
 valid_ports_csv() { [[ "$1" =~ ^[0-9a-zA-Z.,:\>=_-]*$ ]] && [ "${#1}" -le 512 ]; }
+# Socks credentials end up in a systemd EnvironmentFile and inside a
+# socks5://user:pass@host:port url, so keep them clear of : / @ and anything
+# a shell would look at twice.
+valid_socks_user() { [[ "$1" =~ ^[A-Za-z0-9_-]{1,32}$ ]]; }
+valid_socks_pass() { [[ "$1" =~ ^[A-Za-z0-9._+-]{6,64}$ ]]; }
 strip_ansi() { sed -E $'s/\033\\[[0-9;]*[A-Za-z]//g' | tr -d '\033\r'; }
 is_transport() { case "$1" in tcp|tcpmux|ws|wss|wsmux|wssmux|udp) return 0;; *) return 1;; esac; }
 is_mux() { case "$1" in tcpmux|wsmux|wssmux) return 0;; *) return 1;; esac; }
@@ -197,6 +213,11 @@ gen_token() {
   if command -v openssl >/dev/null 2>&1; then openssl rand -base64 48 | tr -dc 'a-zA-Z0-9' | head -c 24
   else tr -dc 'a-zA-Z0-9' </dev/urandom | head -c 24; fi
 }
+gen_socks_user() { printf 'eris%s' "$(tr -dc 'a-z0-9' </dev/urandom | head -c 6)"; }
+gen_socks_pass() {
+  if command -v openssl >/dev/null 2>&1; then openssl rand -base64 48 | tr -dc 'a-zA-Z0-9' | head -c 18
+  else tr -dc 'a-zA-Z0-9' </dev/urandom | head -c 18; fi
+}
 local_ipv4s() {
   if command -v ip >/dev/null 2>&1; then
     ip -4 -o addr show scope global 2>/dev/null | awk '{split($4,a,"/"); print $2" "a[1]}' | grep -v '^lo '
@@ -247,9 +268,10 @@ gh_latest_tag() {
   curl -fsSL --max-time 20 "https://api.github.com/repos/$GH_REPO/releases/latest" 2>/dev/null \
     | grep -m1 '"tag_name"' | sed -E 's/.*"tag_name"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/'
 }
-gh_asset_url() {
-  local arch="$1" json urls pick
-  json="$(curl -fsSL --max-time 20 "https://api.github.com/repos/$GH_REPO/releases/latest" 2>/dev/null)"
+gh_asset_url() { gh_asset_url_repo "$GH_REPO" "$1"; }
+gh_asset_url_repo() {
+  local repo="$1" arch="$2" json urls pick
+  json="$(curl -fsSL --max-time 20 "https://api.github.com/repos/$repo/releases/latest" 2>/dev/null)"
   [ -z "$json" ] && return 1
   urls="$(grep -oE '"browser_download_url"[[:space:]]*:[[:space:]]*"[^"]+"' <<<"$json" \
         | sed -E 's/.*"(https[^"]+)"$/\1/' | grep -iE "linux[_-]${arch}" \
@@ -410,8 +432,188 @@ Unit=backhaul-restart@%i.service
 [Install]
 WantedBy=timers.target
 EOF
+  socks_provider_read >/dev/null 2>&1 && socks_write_unit >/dev/null 2>&1
   systemctl daemon-reload 2>/dev/null
 }
+# =========================================================== SOCKS5 PROXY ==
+# The proxy itself is not ours: whichever small socks5 server the host can get
+# hold of is wrapped in eris-socks@<tunnel>.  microsocks first, since a distro
+# package needs no download and gets security updates; gost as the fallback,
+# because plenty of still-supported releases do not carry microsocks.
+gost_arch() {
+  case "$(arch_tag)" in
+    amd64) echo amd64 ;; arm64) echo arm64 ;; arm) echo armv7 ;; 386) echo 386 ;;
+    *) echo unsupported ;;
+  esac
+}
+socks_provider_write() { printf '%s\t%s\n' "$1" "$2" > "$SOCKS_PROV_FILE"; chmod 600 "$SOCKS_PROV_FILE"; }
+socks_provider_read() { # -> SOCKS_KIND, SOCKS_BIN
+  SOCKS_KIND=""; SOCKS_BIN=""
+  [ -s "$SOCKS_PROV_FILE" ] || return 1
+  IFS=$'\t' read -r SOCKS_KIND SOCKS_BIN < "$SOCKS_PROV_FILE"
+  case "$SOCKS_KIND" in microsocks|gost) ;; *) SOCKS_KIND=""; SOCKS_BIN=""; return 1 ;; esac
+  [ -x "$SOCKS_BIN" ] || { SOCKS_KIND=""; SOCKS_BIN=""; return 1; }
+  return 0
+}
+socks_provider_name() {
+  socks_provider_read || { echo "none"; return; }
+  echo "$SOCKS_KIND"
+}
+socks_install_microsocks() {
+  local p
+  p="$(command -v microsocks 2>/dev/null)"
+  [ -n "$p" ] && { socks_provider_write microsocks "$p"; return 0; }
+  case "$(pkg_mgr)" in
+    apt) apt-get update -qq >/dev/null 2>&1
+         DEBIAN_FRONTEND=noninteractive apt-get install -y -qq microsocks >/dev/null 2>&1 ;;
+    dnf) dnf install -y -q microsocks >/dev/null 2>&1 ;;
+    yum) yum install -y -q microsocks >/dev/null 2>&1 ;;
+    apk) apk add --no-cache microsocks >/dev/null 2>&1 ;;
+    *) return 1 ;;
+  esac
+  p="$(command -v microsocks 2>/dev/null)"
+  [ -n "$p" ] || return 1
+  socks_provider_write microsocks "$p"
+}
+socks_install_gost() {
+  local a url tmp d bin
+  a="$(gost_arch)"
+  [ "$a" = unsupported ] && { bad "unsupported architecture for gost"; return 1; }
+  info "looking for a gost release for linux/$a"
+  url="$(gh_asset_url_repo "$GOST_REPO" "$a")" || { bad "no matching gost asset - check connectivity to github"; return 1; }
+  dim "${url##*/}"
+  tmp="$(mktemp)" || return 1
+  if ! curl -fsSL --retry 3 --max-time 120 -o "$tmp" "$url"; then
+    bad "download failed"; rm -f "$tmp"; return 1
+  fi
+  show_sha256 "$tmp"
+  d="$(mktemp -d)" || { rm -f "$tmp"; return 1; }
+  case "$url" in
+    *.tar.gz|*.tgz) tar -xzf "$tmp" -C "$d" 2>/dev/null ;;
+    *.zip) command -v unzip >/dev/null 2>&1 || case "$(pkg_mgr)" in
+             apt) apt-get install -y -qq unzip >/dev/null 2>&1 ;;
+             apk) apk add --no-cache unzip >/dev/null 2>&1 ;;
+             none) : ;;
+             *) $(pkg_mgr) install -y unzip >/dev/null 2>&1 ;; esac
+           unzip -oq "$tmp" -d "$d" 2>/dev/null ;;
+    *) cp "$tmp" "$d/gost" ;;
+  esac
+  rm -f "$tmp"
+  bin="$(find "$d" -type f -iname 'gost*' ! -iname '*.md' ! -iname '*.json' ! -iname '*.yml' 2>/dev/null | head -n1)"
+  [ -z "$bin" ] && bin="$(find "$d" -maxdepth 3 -type f -size +1M 2>/dev/null | head -n1)"
+  [ -z "$bin" ] && { bad "no binary inside the gost package"; rm -rf "$d"; return 1; }
+  chmod +x "$bin"
+  install -m 0755 "$bin" "$GOST_BIN"; rm -rf "$d"
+  if ! "$GOST_BIN" -V >/dev/null 2>&1 && ! "$GOST_BIN" -h >/dev/null 2>&1; then
+    bad "gost will not run here"; rm -f "$GOST_BIN"; return 1
+  fi
+  socks_provider_write gost "$GOST_BIN"
+}
+socks_ensure_provider() {
+  socks_provider_read && return 0
+  info "installing a local socks5 server"
+  socks_install_microsocks && socks_provider_read && { ok "provider: microsocks"; socks_write_unit; return 0; }
+  warn "microsocks is not in this system's repositories - trying gost"
+  socks_install_gost && socks_provider_read && { ok "provider: gost"; socks_write_unit; return 0; }
+  bad "could not install a socks5 server"
+  dim "install microsocks or gost by hand, then enable socks again"
+  return 1
+}
+# ExecStart is written with systemd's own ${VAR} form so the credentials live
+# in the per-tunnel EnvironmentFile (mode 600) and never in the unit itself.
+socks_exec_line() {
+  case "$1" in
+    microsocks) printf '%s -i ${SOCKS_BIND} -p ${SOCKS_PORT} -u ${SOCKS_USER} -P ${SOCKS_PASS}' "$2" ;;
+    gost)       printf '%s -L socks5://${SOCKS_USER}:${SOCKS_PASS}@${SOCKS_BIND}:${SOCKS_PORT}' "$2" ;;
+  esac
+}
+socks_write_unit() {
+  socks_provider_read || return 1
+  local ex; ex="$(socks_exec_line "$SOCKS_KIND" "$SOCKS_BIN")"
+  [ -n "$ex" ] || return 1
+  cat > "$SOCKS_UNIT" <<EOF
+[Unit]
+Description=Eris Tunnel 2 - local SOCKS5 proxy (%i)
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+EnvironmentFile=$TUN_DIR/%i/socks.env
+ExecStart=$ex
+Restart=always
+RestartSec=3
+TimeoutStopSec=10
+KillMode=mixed
+KillSignal=SIGTERM
+SendSIGKILL=yes
+LimitNOFILE=1048576
+NoNewPrivileges=yes
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=eris-socks-%i
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  systemctl daemon-reload 2>/dev/null
+  return 0
+}
+socks_env_write() { # <name>  (uses SOCKS_PORT / SOCKS_USER / SOCKS_PASS)
+  local d="$TUN_DIR/$1"
+  [ -d "$d" ] || return 1
+  cat > "$d/socks.env" <<EOF
+SOCKS_BIND=127.0.0.1
+SOCKS_PORT=$SOCKS_PORT
+SOCKS_USER=$SOCKS_USER
+SOCKS_PASS=$SOCKS_PASS
+EOF
+  chmod 600 "$d/socks.env"
+}
+socks_raw()  { systemctl is-active "eris-socks@$1" 2>/dev/null; }
+socks_down() {
+  systemctl disable --now "eris-socks@$1" >/dev/null 2>&1
+  systemctl reset-failed "eris-socks@$1" >/dev/null 2>&1
+  return 0
+}
+socks_up() { # <name>
+  systemctl enable "eris-socks@$1" >/dev/null 2>&1
+  systemctl restart "eris-socks@$1" >/dev/null 2>&1
+  sleep 1
+  [ "$(socks_raw "$1")" = active ]
+}
+socks_uri() { printf 'socks5://%s:%s@%s:%s' "$3" "$4" "$1" "$2"; }
+socks_test() { # <host> <port> <user> <pass>
+  command -v curl >/dev/null 2>&1 || { bad "curl is not installed"; return 1; }
+  info "asking api.ipify.org which ip it sees through the proxy"
+  local out
+  out="$(curl -fsS --max-time 25 -x "socks5h://$3:$4@$1:$2" https://api.ipify.org 2>&1)"
+  if [[ "$out" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+    ok "working - exit ip is $out"; return 0
+  fi
+  bad "the proxy did not answer"
+  [ -n "$out" ] && printf '%s' "$out" | head -n2 | sed 's/^/    /'
+  return 1
+}
+# The socks row inside ports.list is an ordinary mapped port, kept in sync from
+# whatever SOCKS_PUB_PORT / SOCKS_PORT currently say.
+socks_row_clear() { # <dir> <pub_port>
+  [ -n "$2" ] || return 0
+  [ -f "$1/ports.list" ] || return 0
+  awk -F'\t' -v p="$2" '$1!=p' "$1/ports.list" > "$1/ports.tmp" 2>/dev/null \
+    && mv -f "$1/ports.tmp" "$1/ports.list"
+  return 0
+}
+socks_row_set() { # <dir> <pub_port> <socks_port>
+  socks_row_clear "$1" "$2"
+  printf '%s\t127.0.0.1:%s\n' "$2" "$3" >> "$1/ports.list"
+}
+socks_row_present() { # <dir> <pub_port>
+  [ -n "$2" ] || return 1
+  awk -F'\t' -v p="$2" '$1==p{f=1} END{exit !f}' "$1/ports.list" 2>/dev/null
+}
+
 set_restart_timer() {
   local name="$1" every="$2" dir; dir="/etc/systemd/system/backhaul-restart@$name.timer.d"
   if [ "$every" = off ]; then
@@ -864,6 +1066,11 @@ TLS_CERT="$TLS_CERT"
 TLS_KEY="$TLS_KEY"
 PEER_IP="$PEER_IP"
 PUB_IP="$PUB_IP"
+SOCKS_ENABLE="${SOCKS_ENABLE:-false}"
+SOCKS_PORT="${SOCKS_PORT:-}"
+SOCKS_PUB_PORT="${SOCKS_PUB_PORT:-}"
+SOCKS_USER="${SOCKS_USER:-}"
+SOCKS_PASS="${SOCKS_PASS:-}"
 LOGLEVEL="$LOGLEVEL"
 RESTART_EVERY="${RESTART_EVERY:-off}"
 CREATED="$(date '+%F %T')"
@@ -874,7 +1081,15 @@ EOF
 META_KEYS="NAME ROLE PORT TOKEN TRANSPORT CHANNEL_SIZE MUX_CON POOL AGGRESSIVE \
 ACCEPT_UDP NODELAY PROFILE OV_POOL OV_CHANNEL OV_HEARTBEAT OV_KEEPALIVE OV_MUXCON \
 OV_AGGRESSIVE OV_RETRY OV_DIAL OV_NODELAY OV_FRAME OV_RECVBUF OV_STREAMBUF OV_MUXVER \
-SNIFFER WEB_PORT EDGE_IP PEER_IP PUB_IP TLS_CERT TLS_KEY LOGLEVEL RESTART_EVERY"
+SNIFFER WEB_PORT EDGE_IP PEER_IP PUB_IP TLS_CERT TLS_KEY LOGLEVEL RESTART_EVERY \
+SOCKS_ENABLE SOCKS_PORT SOCKS_PUB_PORT SOCKS_USER SOCKS_PASS"
+
+meta_set() { # <tunnel> <key> <value>
+  local f="$TUN_DIR/$1/meta.conf"
+  [ -f "$f" ] || return 1
+  if grep -q "^$2=" "$f"; then sed -i "s|^$2=.*|$2=\"$3\"|" "$f"
+  else printf '%s="%s"\n' "$2" "$3" >> "$f"; fi
+}
 
 load_meta() {
   local dir="$TUN_DIR/$1"
@@ -887,6 +1102,7 @@ load_meta() {
   OV_FRAME=""; OV_RECVBUF=""; OV_STREAMBUF=""; OV_MUXVER=""
   SNIFFER="false"; WEB_PORT="0"; EDGE_IP=""; PEER_IP=""; PUB_IP=""
   TLS_CERT=""; TLS_KEY=""
+  SOCKS_ENABLE="false"; SOCKS_PORT=""; SOCKS_PUB_PORT=""; SOCKS_USER=""; SOCKS_PASS=""
   LOGLEVEL="info"; RESTART_EVERY="off"
   # meta.conf is never sourced: a value that arrived in a pair code would then
   # run as root. Parse it as plain key="value" data instead.
@@ -901,6 +1117,14 @@ load_meta() {
     _v="${_v//[$'\n\r']/}"
     printf -v "$_k" '%s' "$_v"
   done < "$dir/meta.conf"
+  # Socks fields can have arrived in a pair code, so re-check them on every
+  # load rather than trusting what is on disk.
+  [ "$SOCKS_ENABLE" = true ] || SOCKS_ENABLE=false
+  valid_port "$SOCKS_PORT" || SOCKS_PORT=""
+  valid_port "$SOCKS_PUB_PORT" || SOCKS_PUB_PORT=""
+  valid_socks_user "$SOCKS_USER" || SOCKS_USER=""
+  valid_socks_pass "$SOCKS_PASS" || SOCKS_PASS=""
+  [ -n "$SOCKS_PORT" ] && [ -n "$SOCKS_USER" ] && [ -n "$SOCKS_PASS" ] || SOCKS_ENABLE=false
   local heal=0
   TRANSPORT="$(printf '%s' "$TRANSPORT" | strip_ansi | tr -d ' \n' | tail -c 8)"
   is_transport "$TRANSPORT" || { TRANSPORT="$DEFAULT_TRANSPORT"; heal=1; }
@@ -911,10 +1135,14 @@ load_meta() {
   local _k
   for _k in PROFILE OV_POOL OV_CHANNEL OV_HEARTBEAT OV_KEEPALIVE OV_MUXCON \
             OV_AGGRESSIVE OV_RETRY OV_DIAL OV_NODELAY OV_FRAME OV_RECVBUF \
-            OV_STREAMBUF OV_MUXVER; do
+            OV_STREAMBUF OV_MUXVER SOCKS_ENABLE SOCKS_PORT SOCKS_PUB_PORT \
+            SOCKS_USER SOCKS_PASS; do
     grep -q "^$_k=" "$dir/meta.conf" 2>/dev/null && continue
-    if [ "$_k" = PROFILE ]; then printf 'PROFILE="%s"\n' "$PROFILE" >> "$dir/meta.conf"
-    else printf '%s=""\n' "$_k" >> "$dir/meta.conf"; fi
+    case "$_k" in
+      PROFILE)      printf 'PROFILE="%s"\n' "$PROFILE" >> "$dir/meta.conf" ;;
+      SOCKS_ENABLE) printf 'SOCKS_ENABLE="false"\n' >> "$dir/meta.conf" ;;
+      *)            printf '%s=""\n' "$_k" >> "$dir/meta.conf" ;;
+    esac
   done
   return 0
 }
@@ -954,18 +1182,28 @@ pretty_ports() {
 tr_idx() { case "$1" in tcp) echo 1 ;; ws) echo 3 ;; wsmux) echo 4 ;; wss) echo 5 ;; wssmux) echo 6 ;; udp) echo 7 ;; *) echo 2 ;; esac; }
 idx_tr() { case "$1" in 1) echo tcp ;; 3) echo ws ;; 4) echo wsmux ;; 5) echo wss ;; 6) echo wssmux ;; 7) echo udp ;; *) echo tcpmux ;; esac; }
 
-# B2|IRAN_IP|PORT|TOKEN|TRANSPORT#|PROFILE|RESTART|PORTS   (B1 kept for old codes)
+# B3|IRAN_IP|PORT|TOKEN|TRANSPORT#|PROFILE|RESTART|PORTS|SPORT|SPUB|SUSER|SPASS
+# (B2 and B1 are still read, so codes from older builds keep working)
 make_pair_code() {
-  local p="B2|$PUB_IP|$PORT|$TOKEN|$(tr_idx "$TRANSPORT")|${PROFILE:-balanced}|${RESTART_EVERY:-off}|$(ports_csv "$1")"
-  printf 'DBH-%s' "$(printf '%s' "$p" | b64enc)"
+  local sp="" spub="" su="" spw=""
+  if [ "${SOCKS_ENABLE:-false}" = true ]; then
+    sp="${SOCKS_PORT:-}"; spub="${SOCKS_PUB_PORT:-}"
+    su="${SOCKS_USER:-}"; spw="${SOCKS_PASS:-}"
+  fi
+  local p="B3|$PUB_IP|$PORT|$TOKEN|$(tr_idx "$TRANSPORT")|${PROFILE:-balanced}|${RESTART_EVERY:-off}|$(ports_csv "$1")|$sp|$spub|$su|$spw"
+  printf 'ETN-%s' "$(printf '%s' "$p" | b64enc)"
 }
 parse_pair_code() {
   local code="$1" raw ver ti
-  code="${code#DBH-}"; code="$(tr -d '[:space:]' <<<"$code")"
+  code="${code#ETN-}"; code="${code#DBH-}"; code="$(tr -d '[:space:]' <<<"$code")"
   raw="$(printf '%s' "$code" | b64dec)" || return 1
   PC_IP=""; PC_PORT=""; PC_TOKEN=""; PC_TR=""; PC_POOL=""; PC_PROFILE="balanced"
   PC_RESTART="off"; PC_PORTS=""
-  if [[ "$raw" == B2\|* ]]; then
+  PC_SPORT=""; PC_SPUB=""; PC_SUSER=""; PC_SPASS=""
+  if [[ "$raw" == B3\|* ]]; then
+    IFS='|' read -r ver PC_IP PC_PORT PC_TOKEN ti PC_PROFILE PC_RESTART PC_PORTS \
+                     PC_SPORT PC_SPUB PC_SUSER PC_SPASS <<<"$raw"
+  elif [[ "$raw" == B2\|* ]]; then
     IFS='|' read -r ver PC_IP PC_PORT PC_TOKEN ti PC_PROFILE PC_RESTART PC_PORTS <<<"$raw"
   elif [[ "$raw" == B1\|* ]]; then
     IFS='|' read -r ver PC_IP PC_PORT PC_TOKEN ti PC_POOL PC_RESTART PC_PORTS <<<"$raw"
@@ -977,6 +1215,12 @@ parse_pair_code() {
   # A pair code is pasted in from outside, so treat every field as hostile.
   valid_ports_csv "$PC_PORTS" || return 1
   valid_token "$PC_TOKEN" || return 1
+  if [ -n "$PC_SPORT$PC_SPUB$PC_SUSER$PC_SPASS" ]; then
+    valid_port "$PC_SPORT" || return 1
+    valid_socks_user "$PC_SUSER" || return 1
+    valid_socks_pass "$PC_SPASS" || return 1
+    [ -z "$PC_SPUB" ] || valid_port "$PC_SPUB" || return 1
+  fi
   valid_host "$PC_IP" && valid_port "$PC_PORT"
 }
 show_pair_code() {
@@ -1002,6 +1246,7 @@ tunnel_complete() {
 # which from the menu looks exactly like a freeze. Bound the stop and force it.
 stop_tunnel_hard() {
   local n="$1"
+  socks_down "$n"
   systemctl disable "backhaul@$n" >/dev/null 2>&1
   if ! timeout 15 systemctl stop "backhaul@$n" >/dev/null 2>&1; then
     warn "service did not stop in time - forcing it"
@@ -1249,6 +1494,36 @@ screen_new_iran() {
   [ "$TRANSPORT" = udp ] && ACCEPT_UDP=false
   RESTART_EVERY="$(pick_restart)"
 
+  SOCKS_ENABLE=false; SOCKS_PORT=""; SOCKS_PUB_PORT=""; SOCKS_USER=""; SOCKS_PASS=""
+  if [ "$TRANSPORT" != udp ]; then
+    echo; top; sect "SOCKS5 PROXY (optional)"
+    row "$(printf '%shand this tunnel out as an outbound proxy as well: apps%s' "$D" "$N")"
+    row "$(printf '%stalk socks5 to this server and leave from the kharej ip.%s' "$D" "$N")"
+    bot; echo
+    if yesno "expose a socks5 proxy through this tunnel?" n; then
+      while :; do
+        ask "socks port for users on THIS server" "$DEFAULT_SOCKS_PORT"; SOCKS_PUB_PORT="$ANS"
+        valid_port "$SOCKS_PUB_PORT" || { bad "invalid port"; continue; }
+        [ "$SOCKS_PUB_PORT" = "$PORT" ] && { bad "that is the tunnel port"; continue; }
+        if awk -F'\t' -v x="$SOCKS_PUB_PORT" '$1==x{f=1} END{exit !f}' "$TUN_DIR/$name/ports.list" 2>/dev/null; then
+          bad "$SOCKS_PUB_PORT is already one of the user ports"; continue
+        fi
+        if port_in_use "$SOCKS_PUB_PORT"; then
+          warn "port $SOCKS_PUB_PORT is already in use"
+          yesno "use it anyway?" n || continue
+        fi
+        break
+      done
+      ask "socks port on the KHAREJ server" "$DEFAULT_SOCKS_PORT"; SOCKS_PORT="$ANS"
+      valid_port "$SOCKS_PORT" || SOCKS_PORT="$DEFAULT_SOCKS_PORT"
+      SOCKS_USER="$(gen_socks_user)"; SOCKS_PASS="$(gen_socks_pass)"
+      SOCKS_ENABLE=true
+      socks_row_set "$TUN_DIR/$name" "$SOCKS_PUB_PORT" "$SOCKS_PORT"
+      ok "socks5 will listen on :$SOCKS_PUB_PORT here"
+      dim "the kharej side sets its own proxy up from the pair code"
+    fi
+  fi
+
   if yesno "enable the built-in web dashboard?" n; then
     ask "dashboard port" "2060"
     valid_port "$ANS" && { WEB_PORT="$ANS"; SNIFFER=true; }
@@ -1273,6 +1548,7 @@ screen_new_iran() {
   kv "listen"    "$W:$PORT$N"
   kv "transport" "$W$TRANSPORT$N $D- $(transport_hint "$TRANSPORT")$N"
   kv "ports"     "$W$(pretty_ports "$(ports_csv "$TUN_DIR/$name")")$N"
+  [ "$SOCKS_ENABLE" = true ] && kv "socks5" "$W$(socks_uri "$PUB_IP" "$SOCKS_PUB_PORT" "$SOCKS_USER" "$SOCKS_PASS")$N"
   kv "restart"   "$([ "$RESTART_EVERY" = off ] && printf '%soff%s' "$D" "$N" || printf '%severy %s%s' "$G" "$RESTART_EVERY" "$N")"
   [ -n "$TLS_CERT" ] && kv "certificate" "$W$(cert_cn "$TLS_CERT")$N $D- $(cert_days_left "$TLS_CERT")d left$N"
   [ "$WEB_PORT" != 0 ] && kv "dashboard" "${W}http://$PUB_IP:$WEB_PORT$N"
@@ -1342,6 +1618,8 @@ screen_new_kharej() {
   POOL="$PC_POOL"; PROFILE="$PC_PROFILE"; PEER_IP="$PC_IP"; PUB_IP=""; LOGLEVEL=info
   CHANNEL_SIZE="$DEFAULT_CHANNEL"; MUX_CON="$DEFAULT_MUXCON"
   AGGRESSIVE=false; ACCEPT_UDP=false; NODELAY=true; RESTART_EVERY="$PC_RESTART"
+  TLS_CERT=""; TLS_KEY=""
+  SOCKS_ENABLE=false; SOCKS_PORT=""; SOCKS_PUB_PORT=""; SOCKS_USER=""; SOCKS_PASS=""
 
   write_meta "$TUN_DIR/$name"
   PARTIAL_TUNNEL=""
@@ -1355,6 +1633,33 @@ screen_new_kharej() {
   start_tunnel "$name" || { pause; return; }
   set_restart_timer "$name" "$RESTART_EVERY"
   [ "$RESTART_EVERY" != off ] && ok "scheduled restart armed from the pair code: every $RESTART_EVERY"
+
+  if [ -n "$PC_SPORT" ]; then
+    echo; top; sect "SOCKS5 PROXY"
+    row "$(printf '%sthe iran side publishes a socks5 proxy and expects it%s' "$D" "$N")"
+    row "$(printf '%sto run here on 127.0.0.1:%s%s' "$D" "$PC_SPORT" "$N")"
+    bot; echo
+    if yesno "set the socks5 proxy up now?" y; then
+      SOCKS_PORT="$PC_SPORT"; SOCKS_PUB_PORT="$PC_SPUB"
+      SOCKS_USER="$PC_SUSER"; SOCKS_PASS="$PC_SPASS"
+      if socks_ensure_provider; then
+        socks_env_write "$name"
+        meta_set "$name" SOCKS_PORT "$SOCKS_PORT"
+        meta_set "$name" SOCKS_PUB_PORT "$SOCKS_PUB_PORT"
+        meta_set "$name" SOCKS_USER "$SOCKS_USER"
+        meta_set "$name" SOCKS_PASS "$SOCKS_PASS"
+        meta_set "$name" SOCKS_ENABLE true
+        if socks_up "$name"; then
+          ok "socks5 proxy up on 127.0.0.1:$SOCKS_PORT via $(socks_provider_name)"
+          [ -n "$SOCKS_PUB_PORT" ] && \
+            dim "users: $(socks_uri "$PEER_IP" "$SOCKS_PUB_PORT" "$SOCKS_USER" "$SOCKS_PASS")"
+        else
+          bad "the socks service did not start"
+          dim "journalctl -u eris-socks@$name -n 30"
+        fi
+      fi
+    fi
+  fi
   echo
   info "your panel on THIS server must listen on the same ports"
   dim "users connect to  $PEER_IP:<user port>"
@@ -1377,11 +1682,14 @@ screen_ports() {
     top; sect "USER PORTS"; blank
     if [ ! -s "$dir/ports.list" ]; then row "$(printf '%s(none)%s' "$D" "$N")"
     else
-      local i=1 lport target
+      local i=1 lport target _lbl
       while IFS=$'\t' read -r lport target; do
         [ -z "$lport" ] && continue
-        row "$(printf '%s%2d.%s %s%-8s%s %s%s%s' "$D" "$i" "$N" "$C" "$lport" "$N" "$D" \
-              "$([ "$target" != "-" ] && echo "-> $target" || echo "-> same port on kharej")" "$N")"
+        if [ "$SOCKS_ENABLE" = true ] && [ "$lport" = "$SOCKS_PUB_PORT" ]; then
+          _lbl="-> socks5 proxy on kharej"
+        elif [ "$target" != "-" ]; then _lbl="-> $target"
+        else _lbl="-> same port on kharej"; fi
+        row "$(printf '%s%2d.%s %s%-8s%s %s%s%s' "$D" "$i" "$N" "$C" "$lport" "$N" "$D" "$_lbl" "$N")"
         i=$((i+1))
       done < "$dir/ports.list"
     fi
@@ -1420,7 +1728,13 @@ screen_ports() {
          pause ;;
       2) ask "row number"
          [[ "$ANS" =~ ^[0-9]+$ ]] || { bad "invalid"; pause; continue; }
-         sed -i "${ANS}d" "$dir/ports.list" 2>/dev/null && ok "removed - press [3] to apply" || bad "failed"
+         if sed -i "${ANS}d" "$dir/ports.list" 2>/dev/null; then
+           ok "removed - press [3] to apply"
+           if [ "$SOCKS_ENABLE" = true ] && ! socks_row_present "$dir" "$SOCKS_PUB_PORT"; then
+             meta_set "$name" SOCKS_ENABLE false
+             warn "that row carried the socks5 proxy - socks is now off for this tunnel"
+           fi
+         else bad "failed"; fi
          pause ;;
       3) regen_config "$name" || { bad "config generation failed"; pause; continue; }
          acct_sync "$name" >/dev/null 2>&1
@@ -1428,6 +1742,203 @@ screen_ports() {
          systemctl restart "backhaul@$name" 2>/dev/null; sleep 2
          [ "$(svc_raw "$name")" = active ] && ok "applied and running" || bad "did not come up"
          warn "ports changed - the kharej side does not need re-pairing"
+         pause ;;
+      0|_) return ;;
+    esac
+  done
+}
+
+# =========================================================== SOCKS5 SCREEN =
+socks_apply_iran() { # <name> - regenerate, re-pair, restart
+  regen_config "$1" || return 1
+  acct_sync "$1" >/dev/null 2>&1
+  load_meta "$1"
+  make_pair_code "$TUN_DIR/$1" > "$TUN_DIR/$1/pair.code"
+  chmod 600 "$TUN_DIR/$1/pair.code"
+  systemctl restart "backhaul@$1" 2>/dev/null; sleep 2
+  [ "$(svc_raw "$1")" = active ]
+}
+
+screen_socks() {
+  local name="$1" dir="$TUN_DIR/$1"
+  while :; do
+    load_meta "$name"
+    header "SOCKS5 PROXY - $name"
+    top; sect "HOW IT WORKS"
+    row "$(printf '%san app speaks socks5 to the IRAN server, the tunnel%s' "$D" "$N")"
+    row "$(printf '%scarries it to KHAREJ and the traffic leaves from there,%s' "$D" "$N")"
+    row "$(printf '%sso the exit ip a site sees is the KHAREJ one.%s' "$D" "$N")"
+    mid; sect "STATUS"; blank
+    if [ "$SOCKS_ENABLE" = true ]; then kv "mode" "$(badge ON "$BG_OK$W")"
+    else kv "mode" "$(badge OFF "$BG_WARN$W")"; fi
+    if [ "$ROLE" = server ]; then
+      kv "users port"  "$([ -n "$SOCKS_PUB_PORT" ] && printf '%s:%s%s' "$W" "$SOCKS_PUB_PORT" "$N" || printf '%s-%s' "$D" "$N")"
+      kv "kharej port" "$([ -n "$SOCKS_PORT" ] && printf '%s127.0.0.1:%s%s' "$W" "$SOCKS_PORT" "$N" || printf '%s-%s' "$D" "$N")"
+      if [ "$SOCKS_ENABLE" = true ] && ! socks_row_present "$dir" "$SOCKS_PUB_PORT"; then
+        row "$(printf '%sthe port mapping is missing - turn socks off and on again%s' "$R" "$N")"
+      fi
+    else
+      kv "listens on" "$([ -n "$SOCKS_PORT" ] && printf '%s127.0.0.1:%s%s' "$W" "$SOCKS_PORT" "$N" || printf '%s-%s' "$D" "$N")"
+      kv "provider"   "$W$(socks_provider_name)$N"
+      local _sk; _sk="$(socks_raw "$name")"
+      kv "service"    "$([ "$_sk" = active ] && badge ACTIVE "$BG_OK$W" || badge "${_sk:-inactive}" "$BG_ERR$W")"
+      kv "users reach" "$([ -n "$SOCKS_PUB_PORT" ] && printf '%s%s:%s%s' "$W" "$PEER_IP" "$SOCKS_PUB_PORT" "$N" || printf '%sset on the iran side%s' "$D" "$N")"
+    fi
+    kv "user"     "$([ -n "$SOCKS_USER" ] && printf '%s%s%s' "$W" "$SOCKS_USER" "$N" || printf '%s-%s' "$D" "$N")"
+    kv "password" "$([ -n "$SOCKS_PASS" ] && printf '%s%s%s' "$W" "$SOCKS_PASS" "$N" || printf '%s-%s' "$D" "$N")"
+    mid
+    item 1 "$([ "$SOCKS_ENABLE" = true ] && echo "Turn off" || echo "Turn on")" ""
+    if [ "$ROLE" = server ]; then
+      item 2 "Change users port" "the port on THIS server"
+      item 3 "Change kharej port" "must match the kharej side"
+      item 4 "New credentials" "re-pair kharej afterwards"
+    else
+      item 2 "Change local port" "must match what iran maps to"
+      item 3 "Set credentials" "copy them from the iran side"
+      item 4 "Restart proxy service" ""
+    fi
+    item 5 "Client settings" "what to paste into an app"
+    item t "Test the proxy" "shows the exit ip"
+    item 0 "Back" ""
+    bot; echo; getkey
+    case "$KEY" in
+      1) if [ "$SOCKS_ENABLE" = true ]; then
+           yesno "turn the socks5 proxy off?" y || { pause; continue; }
+           if [ "$ROLE" = server ]; then
+             socks_row_clear "$dir" "$SOCKS_PUB_PORT"
+             meta_set "$name" SOCKS_ENABLE false
+             socks_apply_iran "$name" && ok "socks5 is off" || bad "config apply failed"
+           else
+             socks_down "$name"; meta_set "$name" SOCKS_ENABLE false; ok "socks5 is off"
+           fi
+         elif [ "$ROLE" = server ]; then
+           [ "$TRANSPORT" = udp ] && { bad "socks5 needs a tcp transport - this tunnel is udp"; pause; continue; }
+           local pub kp
+           ask "socks port for users on THIS server" "${SOCKS_PUB_PORT:-$DEFAULT_SOCKS_PORT}"; pub="$ANS"
+           valid_port "$pub" || { bad "invalid port"; pause; continue; }
+           [ "$pub" = "$PORT" ] && { bad "that is the tunnel port"; pause; continue; }
+           ask "socks port on the KHAREJ server" "${SOCKS_PORT:-$DEFAULT_SOCKS_PORT}"; kp="$ANS"
+           valid_port "$kp" || { bad "invalid port"; pause; continue; }
+           [ -n "$SOCKS_USER" ] || SOCKS_USER="$(gen_socks_user)"
+           [ -n "$SOCKS_PASS" ] || SOCKS_PASS="$(gen_socks_pass)"
+           meta_set "$name" SOCKS_PUB_PORT "$pub"
+           meta_set "$name" SOCKS_PORT "$kp"
+           meta_set "$name" SOCKS_USER "$SOCKS_USER"
+           meta_set "$name" SOCKS_PASS "$SOCKS_PASS"
+           meta_set "$name" SOCKS_ENABLE true
+           socks_row_set "$dir" "$pub" "$kp"
+           if socks_apply_iran "$name"; then
+             ok "socks5 published on :$pub"
+             warn "re-pair the kharej side so it starts its proxy"
+             warn "open TCP/$pub in this server's firewall"
+           else bad "config apply failed"; fi
+         else
+           local kp2
+           ask "local socks port (must match what iran maps to)" "${SOCKS_PORT:-$DEFAULT_SOCKS_PORT}"; kp2="$ANS"
+           valid_port "$kp2" || { bad "invalid port"; pause; continue; }
+           if [ -z "$SOCKS_USER" ]; then
+             ask "socks user" "$(gen_socks_user)"; SOCKS_USER="$ANS"
+           fi
+           valid_socks_user "$SOCKS_USER" || { bad "user: 1-32 chars of A-Z a-z 0-9 _ -"; pause; continue; }
+           if [ -z "$SOCKS_PASS" ]; then
+             ask "socks password" "$(gen_socks_pass)"; SOCKS_PASS="$ANS"
+           fi
+           valid_socks_pass "$SOCKS_PASS" || { bad "password: 6-64 chars of A-Z a-z 0-9 . _ + -"; pause; continue; }
+           socks_ensure_provider || { pause; continue; }
+           SOCKS_PORT="$kp2"
+           socks_env_write "$name"
+           meta_set "$name" SOCKS_PORT "$kp2"
+           meta_set "$name" SOCKS_USER "$SOCKS_USER"
+           meta_set "$name" SOCKS_PASS "$SOCKS_PASS"
+           meta_set "$name" SOCKS_ENABLE true
+           if socks_up "$name"; then ok "socks5 listening on 127.0.0.1:$kp2"
+           else bad "the service did not start"; dim "journalctl -u eris-socks@$name -n 30"; fi
+         fi
+         pause ;;
+      2) if [ "$ROLE" = server ]; then
+           ask "new socks port for users" "${SOCKS_PUB_PORT:-$DEFAULT_SOCKS_PORT}"
+           valid_port "$ANS" || { bad "invalid port"; pause; continue; }
+           [ "$ANS" = "$PORT" ] && { bad "that is the tunnel port"; pause; continue; }
+           socks_row_clear "$dir" "$SOCKS_PUB_PORT"
+           meta_set "$name" SOCKS_PUB_PORT "$ANS"
+           [ "$SOCKS_ENABLE" = true ] && socks_row_set "$dir" "$ANS" "$SOCKS_PORT"
+           socks_apply_iran "$name" && ok "users now connect to :$ANS" || bad "config apply failed"
+         else
+           ask "new local socks port" "${SOCKS_PORT:-$DEFAULT_SOCKS_PORT}"
+           valid_port "$ANS" || { bad "invalid port"; pause; continue; }
+           SOCKS_PORT="$ANS"
+           meta_set "$name" SOCKS_PORT "$ANS"
+           if [ "$SOCKS_ENABLE" = true ]; then
+             socks_env_write "$name"
+             socks_up "$name" && ok "listening on 127.0.0.1:$ANS" || bad "the service did not start"
+           else ok "saved"; fi
+           warn "the iran side must map its public port to 127.0.0.1:$ANS"
+         fi
+         pause ;;
+      3) if [ "$ROLE" = server ]; then
+           ask "new socks port on the KHAREJ server" "${SOCKS_PORT:-$DEFAULT_SOCKS_PORT}"
+           valid_port "$ANS" || { bad "invalid port"; pause; continue; }
+           meta_set "$name" SOCKS_PORT "$ANS"
+           [ "$SOCKS_ENABLE" = true ] && socks_row_set "$dir" "$SOCKS_PUB_PORT" "$ANS"
+           if socks_apply_iran "$name"; then
+             ok "mapped to 127.0.0.1:$ANS on kharej"
+             warn "set the same port on the kharej side, or re-pair it"
+           else bad "config apply failed"; fi
+         else
+           ask "socks user" "${SOCKS_USER:-$(gen_socks_user)}"
+           valid_socks_user "$ANS" || { bad "user: 1-32 chars of A-Z a-z 0-9 _ -"; pause; continue; }
+           SOCKS_USER="$ANS"
+           ask "socks password" "${SOCKS_PASS:-$(gen_socks_pass)}"
+           valid_socks_pass "$ANS" || { bad "password: 6-64 chars of A-Z a-z 0-9 . _ + -"; pause; continue; }
+           SOCKS_PASS="$ANS"
+           meta_set "$name" SOCKS_USER "$SOCKS_USER"
+           meta_set "$name" SOCKS_PASS "$SOCKS_PASS"
+           if [ "$SOCKS_ENABLE" = true ]; then
+             socks_env_write "$name"
+             socks_up "$name" && ok "credentials applied" || bad "the service did not start"
+           else ok "saved"; fi
+         fi
+         pause ;;
+      4) if [ "$ROLE" = server ]; then
+           yesno "generate a new user and password?" y || { pause; continue; }
+           SOCKS_USER="$(gen_socks_user)"; SOCKS_PASS="$(gen_socks_pass)"
+           meta_set "$name" SOCKS_USER "$SOCKS_USER"
+           meta_set "$name" SOCKS_PASS "$SOCKS_PASS"
+           load_meta "$name"
+           make_pair_code "$dir" > "$dir/pair.code"; chmod 600 "$dir/pair.code"
+           ok "new credentials stored"
+           warn "kharej still uses the old ones - re-pair it or set them there by hand"
+         else
+           [ "$SOCKS_ENABLE" = true ] || { bad "socks is off"; pause; continue; }
+           socks_env_write "$name"
+           socks_up "$name" && ok "proxy restarted" || { bad "did not start"; dim "journalctl -u eris-socks@$name -n 30"; }
+         fi
+         pause ;;
+      5) local h p
+         [ "$ROLE" = server ] && h="$PUB_IP" || h="$PEER_IP"
+         p="$SOCKS_PUB_PORT"
+         if [ -z "$p" ] || [ -z "$SOCKS_USER" ] || [ -z "$SOCKS_PASS" ]; then
+           bad "nothing to show yet - turn socks on first"; pause; continue
+         fi
+         echo; top; sect "CLIENT SETTINGS"; blank
+         kv "type"     "${W}SOCKS5$N"
+         kv "host"     "$W${h:-<iran ip>}$N"
+         kv "port"     "$W$p$N"
+         kv "user"     "$W$SOCKS_USER$N"
+         kv "password" "$W$SOCKS_PASS$N"
+         blank
+         row "$(printf '%s%s%s' "$W" "$(socks_uri "${h:-<iran-ip>}" "$p" "$SOCKS_USER" "$SOCKS_PASS")" "$N")"
+         bot; echo
+         dim "tcp only - udp associate is not carried over the tunnel"
+         pause ;;
+      t|T) local tp
+         [ "$ROLE" = server ] && tp="$SOCKS_PUB_PORT" || tp="$SOCKS_PORT"
+         if [ -z "$tp" ] || [ -z "$SOCKS_USER" ] || [ -z "$SOCKS_PASS" ]; then
+           bad "nothing configured yet"; pause; continue
+         fi
+         echo
+         socks_test 127.0.0.1 "$tp" "$SOCKS_USER" "$SOCKS_PASS"
+         [ "$ROLE" = server ] && dim "that went out through the tunnel, so the ip should be the kharej one"
          pause ;;
       0|_) return ;;
     esac
@@ -1602,6 +2113,14 @@ screen_manage() {
       kv "certificate" "$W$(cert_cn "$TLS_CERT")$N $([ "${_d:-0}" -lt 15 ] 2>/dev/null && printf '%s' "$R" || printf '%s' "$D")${_d}d left$N"
     fi
     [ "$WEB_PORT" != 0 ] && kv "dashboard" "${W}port $WEB_PORT$N"
+    if [ "${SOCKS_ENABLE:-false}" = true ]; then
+      if [ "$ROLE" = server ]; then
+        kv "socks5" "${W}:$SOCKS_PUB_PORT$N $D-> 127.0.0.1:$SOCKS_PORT on kharej$N"
+      else
+        local _sk; _sk="$(socks_raw "$name")"
+        kv "socks5" "${W}127.0.0.1:$SOCKS_PORT$N  $([ "$_sk" = active ] && badge ACTIVE "$BG_OK$W" || badge "${_sk:-down}" "$BG_ERR$W")"
+      fi
+    fi
     mid; sect "CONTROL"
     item 1 "Start" ""; item 2 "Stop" ""; item 3 "Restart" ""
     if [ "$ROLE" = server ]; then
@@ -1613,6 +2132,7 @@ screen_manage() {
     item 5 "Tuning" "transport, profile, advanced"
     item 6 "Endpoint" "port or peer ip"
     item 7 "Scheduled restart" ""
+    item 9 "SOCKS5 proxy" "$([ "${SOCKS_ENABLE:-false}" = true ] && echo "on - port ${SOCKS_PUB_PORT:-$SOCKS_PORT}" || echo "off - tunnel as outbound proxy")"
     mid; sect "INSPECT"
     item 8 "Show config" ""
     item s "Speed test" "latency + throughput"
@@ -1630,6 +2150,7 @@ screen_manage() {
          else info "user ports are configured on the IRAN server"; pause; fi ;;
       5) screen_tuning "$name" ;;
       6) screen_endpoint "$name" ;;
+      9) screen_socks "$name" ;;
       s|S) speed_screen "$name" ;;
       l|L) screen_logs "$name" ;;
       7) echo; top; sect "SCHEDULED RESTART"; blank
@@ -1715,7 +2236,7 @@ screen_dashboard() {
     done <<<"$(tunnel_names)"
     mid; sect "LISTENING"
     local socks ln
-    socks="$(ss -tulnp 2>/dev/null | grep -i backhaul | awk '{print $1"  "$5}' | head -n 8)"
+    socks="$(ss -tulnp 2>/dev/null | grep -iE 'backhaul|microsocks|eris-gost' | awk '{print $1"  "$5}' | head -n 8)"
     if [ -n "$socks" ]; then while read -r ln; do row "$(printf '%s%s%s' "$D" "$ln" "$N")"; done <<<"$socks"
     else row "$(printf '%s(none)%s' "$D" "$N")"; fi
     mid
@@ -2176,6 +2697,13 @@ health_check() {
       elif [ "$cd" -lt 15 ]; then warn "certificate expires in ${cd}d"
       else ok "certificate valid for ${cd}d"; fi
     fi
+    if [ "${SOCKS_ENABLE:-false}" = true ] && [ "$ROLE" = client ]; then
+      [ "$(socks_raw "$n")" = active ] && ok "socks5 proxy active ($(socks_provider_name))" \
+        || bad "socks5 proxy not active - journalctl -u eris-socks@$n"
+      ss -tln 2>/dev/null | grep -qE "127\.0\.0\.1:$SOCKS_PORT\b" \
+        && ok "socks5 listening on 127.0.0.1:$SOCKS_PORT" \
+        || bad "socks5 NOT listening on 127.0.0.1:$SOCKS_PORT"
+    fi
     local d; d="$(drops_since "$n" '1 hour ago')"
     if [ "${d:-0}" -eq 0 ]; then ok "no reconnect events in the last hour"
     elif [ "${d:-0}" -le 5 ]; then warn "$d event(s) in the last hour"
@@ -2283,8 +2811,8 @@ screen_uninstall() {
     stop_tunnel_hard "$n"
     set_restart_timer "$n" off
   done
-  rm -f "$UNIT_FILE" "$RS_UNIT" "$RS_TIMER"; systemctl daemon-reload 2>/dev/null
-  rm -f "$BIN_PATH" "$BIN_PATH.bak"
+  rm -f "$UNIT_FILE" "$RS_UNIT" "$RS_TIMER" "$SOCKS_UNIT"; systemctl daemon-reload 2>/dev/null
+  rm -f "$BIN_PATH" "$BIN_PATH.bak" "$GOST_BIN"
   rm -rf "$BASE_DIR"
   ok "uninstalled"
   pause; exit 0

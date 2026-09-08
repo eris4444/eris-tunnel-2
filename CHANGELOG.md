@@ -3,6 +3,77 @@
 All notable changes to **Eris Tunnel 2** are recorded here.
 This project follows [Semantic Versioning](https://semver.org/).
 
+## [1.5.1] - 2026-09-08
+
+### Added
+
+- **Local SOCKS5 proxy over the tunnel.** Alongside plain port forwarding, a
+  tunnel can now be handed out as an outbound proxy:
+
+  ```
+  app --socks5--> IRAN:users_port --tunnel--> 127.0.0.1:socks_port on KHAREJ --> internet
+  ```
+
+  The exit ip a site sees is the KHAREJ one. Turn it on from
+  `Manage tunnels -> [9] SOCKS5 proxy`, or answer the new prompt while creating
+  an IRAN tunnel.
+
+- The proxy runs on the KHAREJ server as `eris-socks@<tunnel>.service`, bound to
+  **127.0.0.1 only**, so the tunnel is the sole way in. Credentials are
+  mandatory - there is no unauthenticated mode, because the port is reachable
+  from the internet through the IRAN side.
+
+- Provider is picked automatically: **microsocks** from the distribution's own
+  repository when it is packaged there, otherwise a pinned-architecture
+  **gost** binary from GitHub releases (sha256 shown before it is installed).
+
+- On the IRAN side the proxy is just another mapped port
+  (`users_port = 127.0.0.1:socks_port`), so traffic accounting, the health
+  check and the ports screen all understand it. The ports list labels that row
+  `-> socks5 proxy on kharej`, and deleting it turns socks off rather than
+  leaving a dangling mapping.
+
+- `[t] Test the proxy` dials out through the proxy and prints the exit ip, from
+  either side.
+
+- `[5] Client settings` prints the host, port, user, password and a ready
+  `socks5://user:pass@host:port` line to paste into an app.
+
+- Health check reports the proxy service and its listening socket on KHAREJ,
+  and the dashboard's LISTENING panel now includes the proxy's sockets.
+
+### Changed
+
+- **Pair code is now B3** and carries the socks port, public port, user and
+  password, so pairing a KHAREJ server sets its proxy up in one step. Codes are
+  emitted with an `ETN-` prefix. **B2 and B1 codes still parse**, and `DBH-`
+  prefixed codes from Eris Tunnel 2 1.0.2 and DARK VPN Backhaul keep working.
+- Every socks field arriving in a pair code is validated before use, and
+  re-validated on each `meta.conf` load: user `A-Z a-z 0-9 _ -` (1-32), password
+  `A-Z a-z 0-9 . _ + -` (6-64). `:` `@` `/` and every shell metacharacter are
+  refused, so nothing hostile can reach the systemd unit or the proxy url.
+  A tunnel whose socks fields do not survive validation is loaded with socks off
+  instead of half-configured.
+- Credentials live in a per-tunnel `socks.env` (mode 600) referenced by the unit
+  as an `EnvironmentFile`, never inside the unit file itself.
+- `gh_asset_url` was split so a release asset can be resolved for any
+  repository, not just the Backhaul core.
+- Tunnels created before this version gain the new `meta.conf` keys on first
+  load, with socks off.
+- `meta_set` replaces the scattered `sed -i` calls that edited `meta.conf`, and
+  appends a key that is not there yet instead of silently doing nothing.
+
+### Fixed
+
+- Creating a KHAREJ tunnel could write a stale `TLS_CERT` / `TLS_KEY` path into
+  its `meta.conf`, carried over from an IRAN tunnel visited earlier in the same
+  session. Both are now cleared before the metadata is written.
+
+### Removed / cleanup
+
+- Uninstall now also removes `eris-socks@.service` and the downloaded gost
+  binary.
+
 ## [1.0.2] - 2026-09-08
 
 First release under the **Eris Tunnel 2** name. The manager was rebranded end

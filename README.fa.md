@@ -22,7 +22,7 @@
 <div dir="rtl">
 
 **مدیر پیشرفته تانل معکوس Backhaul**
-`نسخه 1.0.2`
+`نسخه 1.5.1`
 پشتیبانی: `@erisrttg`
 
 ---
@@ -82,7 +82,8 @@ USER
 ## امکانات اصلی
 
 - ساخت مرحله‌به‌مرحله تانل ایران و خارج
-- پیرکد نسخه ۲، با سازگاری کامل با پیرکدهای قدیمی B1
+- **پروکسی SOCKS5 لوکال**: تحویل تانل به‌صورت پروکسی خروجی
+- پیرکد نسخه ۳، با سازگاری کامل با پیرکدهای قدیمی B2 و B1
 - فوروارد چندپورتی و نگاشت دلخواه مقصد
 - ترنسپورت‌ها: `tcp`، `tcpmux`، `ws`، `wsmux`، `wss`، `wssmux`، `udp`
 - پروفایل‌های عملکرد: Stable، Balanced، Low Ping، Turbo
@@ -116,6 +117,7 @@ USER
 - بررسی تداخل پورت
 - نصب‌کننده وابستگی‌ها
 - منبع به‌روزرسانی دلخواه
+- تغییر یوزر/پسورد پروکسی و تست زنده آن
 - نصب به‌صورت دستور `eristun2`
 - حذف کامل
 
@@ -141,11 +143,57 @@ USER
 CONTROL     1 Start        2 Stop       3 Restart
 PAIRING     p Pair code                              (فقط ایران)
 CONFIGURE   4 Ports        5 Tuning     6 Endpoint    7 Scheduled restart
+            9 SOCKS5 proxy
 INSPECT     8 Show config  s Speed test L Logs + connections
 ADVANCED    e Edit config by hand       d Delete tunnel
 ```
 
 <div dir="rtl">
+
+## پروکسی SOCKS5
+
+علاوه بر فوروارد پورت‌های ثابت، می‌شود خود تانل را به‌صورت یک پروکسی خروجی
+تحویل داد. برنامه با SOCKS5 به سرور ایران وصل می‌شود، تانل آن را به خارج
+می‌برد و ترافیک از همان‌جا بیرون می‌رود:
+
+</div>
+
+```
+app --socks5--> IRAN:users_port --tunnel--> 127.0.0.1:socks_port (KHAREJ) --> internet
+```
+
+<div dir="rtl">
+
+پس آی‌پی خروجی که سایت مقابل می‌بیند، آی‌پی **سرور خارج** است.
+
+از مسیر `Manage tunnels -> [9] SOCKS5 proxy` روی سرور ایران روشنش کنید، یا به
+سؤالی که هنگام ساخت تانل ایران پرسیده می‌شود جواب بدهید. بعد سرور خارج را
+پیر (pair) کنید؛ خودش از روی پیرکد پروکسی‌اش را در یک مرحله بالا می‌آورد.
+
+| | |
+| --- | --- |
+| سرویس روی خارج | `eris-socks@<tunnel>.service` |
+| آدرس bind | فقط `127.0.0.1` — تنها راه ورود، خود تانل است |
+| موتور پروکسی | `microsocks` از مخزن سیستم، وگرنه `gost` از ریلیزهای گیت‌هاب |
+| یوزر و پسورد | اجباری، در `socks.env` با دسترسی ۶۰۰ |
+| پروتکل | فقط TCP؛ حالت UDP ASSOCIATE منتقل نمی‌شود |
+
+سمت ایران این پروکسی فقط یک پورت map‌شده معمولی است
+(`users_port = 127.0.0.1:socks_port`)، پس شمارش ترافیک، health check و صفحه
+پورت‌ها همه آن را می‌شناسند.
+
+دو نکته مهم:
+
+- یوزر و پسورد **اجباری** است، چون این پورت از طریق سرور ایران از اینترنت
+  قابل دسترسی است. همه کلاینت‌ها از دید پروکسی `127.0.0.1` هستند، پس محدودسازی
+  بر اساس آی‌پی اینجا بی‌معنی است و پسورد تنها دربان ماجراست.
+- اگر پورت‌ها یا یوزر/پسورد را سمت ایران عوض کنید، باید سمت خارج را دوباره پیر
+  کنید یا همان مقادیر را دستی روی آن ست کنید. عوض کردن پورت‌های کاربر عادی
+  همچنان نیازی به پیر مجدد ندارد.
+
+گزینه `[t] Test the proxy` از داخل پروکسی یک درخواست بیرون می‌فرستد و آی‌پی
+خروجی را نشان می‌دهد، و `[5] Client settings` یک خط آماده
+`socks5://user:pass@host:port` می‌دهد.
 
 ## عیب‌یابی
 
@@ -224,7 +272,10 @@ https://raw.githubusercontent.com/eris4444/eris-tunnel-2/main/eris-tunnel-2.sh
 ```
 /etc/eris-tunnel-2/
 /etc/eris-tunnel-2/tunnels/
+/etc/eris-tunnel-2/tunnels/<name>/socks.env
 /etc/eris-tunnel-2/certs/
+/etc/systemd/system/backhaul@.service
+/etc/systemd/system/eris-socks@.service
 /usr/local/bin/backhaul
 /usr/local/bin/eristun2
 ```
@@ -259,7 +310,7 @@ systemctl start 'backhaul@*'
 
 ```
 Eris Tunnel 2
-Version: 1.0.2
+Version: 1.5.1
 Support: @erisrttg
 ```
 
