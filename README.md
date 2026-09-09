@@ -16,7 +16,7 @@
 ```
 
 **Advanced Backhaul Reverse Tunnel Manager**
-`Version 1.7.0`
+`Version 2.0.0`
 Support: `@erisrttg`
 
 ---
@@ -31,7 +31,17 @@ monitoring, testing and troubleshooting reverse tunnels powered by
 > **KHAREJ = Client**
 > The Pair Code is generated on IRAN and pasted on KHAREJ.
 
-A tunnel is created in one of **two modes**, picked from a menu:
+Right after you pick the side, you pick the **engine** that carries the tunnel:
+
+| Engine | What it is |
+| --- | --- |
+| **Backhaul** | [Musixal/Backhaul](https://github.com/Musixal/Backhaul) — the classic core; performance profiles apply |
+| **gost** | [go-gost/gost](https://github.com/go-gost/gost) v3.3.0 — relay + rtcp, nine transports |
+
+Both sides of a tunnel must run the same engine. The pair code carries the
+choice, so the KHAREJ side sets itself up to match.
+
+Then the tunnel is created in one of **two modes**:
 
 | Mode | What your users get |
 | --- | --- |
@@ -76,7 +86,9 @@ USER
 - **SOCKS5 proxy mode**: a proxy on IRAN that exits from the KHAREJ ip
 - Pair Code V4, with B3 / B2 / B1 backward compatibility
 - Multi-port forwarding and custom target mapping
-- Transports: `tcp`, `tcpmux`, `ws`, `wsmux`, `wss`, `wssmux`, `udp`
+- Two engines: Backhaul or gost, chosen per tunnel and carried in the pair code
+- Backhaul transports: `tcp`, `tcpmux`, `ws`, `wsmux`, `wss`, `wssmux`, `udp`
+- gost transports: `mtls`, `tls`, `tcp`, `mws`, `wss`, `ws`, `quic`, `kcp`, `grpc`
 - Performance profiles: Stable, Balanced, Low Ping, Turbo
 - Live terminal dashboard and kernel-level connection inspection
 - Latency and throughput testing, both passive and active
@@ -167,6 +179,53 @@ TUNNELS   1 New tunnel - IRAN    2 New tunnel - KHAREJ   3 Manage tunnels
 MONITOR   4 Dashboard            5 Diagnostics
 SYSTEM    6 Core                 u Update                x Uninstall
 ```
+
+## The gost Engine
+
+Backhaul puts the user ports in the IRAN config. gost works the other way
+round: IRAN runs a relay with remote binding enabled, and KHAREJ asks it to
+open the ports.
+
+```
+IRAN     gost -L "relay+mtls://user:token@:443?bind=true"
+
+KHAREJ   gost -L "rtcp://:8000/127.0.0.1:8000"               -L "rtcp://:2087/127.0.0.1:2087"               -F "relay+mtls://user:token@IRAN:443"
+```
+
+`bind=true` is what lets the far side open ports on your IRAN server, so the
+relay **always** requires credentials — the tunnel token is the password.
+
+| | |
+| --- | --- |
+| Service, both ends | `eris-gost@<tunnel>.service` |
+| Arguments | `gost.env` (mode 600); `[8] Show config` prints them readably |
+| Version | pinned to **v3.3.0**, installed from `[6] Engines` |
+| Certificates | gost generates its own for the TLS transports |
+
+### Choosing a gost transport
+
+| Transport | Good for |
+| --- | --- |
+| `mtls` | encrypted and multiplexed — the default, and the one to start with |
+| `tls` | encrypted, one connection per stream |
+| `tcp` | plain and fastest, easiest to fingerprint |
+| `mws` / `wss` / `ws` | websocket framing, for putting a CDN in front |
+| `quic` / `kcp` | UDP based, better on lossy paths |
+| `grpc` | HTTP/2 framing, blends in with gRPC traffic |
+
+Set the same one on both servers. `[6] Endpoint` changes it later.
+
+### What the gost engine does not do
+
+- **The port list lives on KHAREJ.** The `rtcp` listeners are on the client, so
+  the pair code carries the ports across. Changing them means re-pairing the
+  KHAREJ side — the ports screen says so and re-prints the code.
+- **No performance profiles.** They tune Backhaul's pool, channel size and mux
+  buffers, none of which exist in gost, so `[5] Profile` is hidden on a gost
+  tunnel rather than pretending to work.
+- **TCP only** — UDP forwarding is not wired up for this engine.
+- User ports appear on IRAN only while KHAREJ is connected, because the relay
+  opens them on the client's behalf.
 
 ## SOCKS5 Proxy Mode
 
@@ -320,7 +379,7 @@ The live dashboard on the main menu is a terminal view, and is unaffected.
 
 ## Upstream
 
-The tunnel core comes from **Musixal/Backhaul**.
+The tunnel engines are **Musixal/Backhaul** and **go-gost/gost**.
 Eris Tunnel 2 is an independent management layer, derived from the
 MIT-licensed **darktunnelmika/dark-backhaul**, and is not affiliated with
 either upstream project.
@@ -329,7 +388,7 @@ either upstream project.
 
 ```
 Eris Tunnel 2
-Version: 1.7.0
+Version: 2.0.0
 Support: @erisrttg
 ```
 

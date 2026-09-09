@@ -9,6 +9,11 @@
 #    KHAREJ = [client]  dials out to Iran, holds the real service
 #  So the pair code is generated on IRAN and pasted on KHAREJ.
 #
+#  TWO ENGINES, chosen right after the side:
+#    backhaul - Musixal/Backhaul. The IRAN config holds the user ports.
+#    gost     - go-gost/gost. IRAN runs a relay with bind enabled and KHAREJ
+#               asks it to open the ports, so the port list lives on KHAREJ.
+#
 #  TWO TUNNEL MODES, chosen when the IRAN side is created:
 #
 #    forward - the classic one. ports on IRAN are forwarded to the same or
@@ -31,7 +36,7 @@
 #  ERIS-TUNNEL-2-SCRIPT
 # ==============================================================================
 
-SCRIPT_VER="1.7.0"
+SCRIPT_VER="2.0.0"
 DEV_ID="@erisrttg"
 
 GH_REPO="Musixal/Backhaul"
@@ -47,7 +52,11 @@ UPDATE_URL_FILE="$BASE_DIR/update.url"
 PROXY_UNIT="/etc/systemd/system/eris-proxy@.service"
 LEGACY_SOCKS_UNIT="/etc/systemd/system/eris-socks@.service"
 GOST_REPO="go-gost/gost"
+GOST_VER="3.3.0"
 GOST_BIN="/usr/local/bin/eris-gost"
+GOST_UNIT="/etc/systemd/system/eris-gost@.service"
+DEFAULT_GOST_TR="mtls"
+GOST_USER="eris"
 DEFAULT_PROXY_PORT=1080
 DEFAULT_EXIT_PORT=1080
 SELF_PATH="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "$0")"
@@ -172,6 +181,33 @@ valid_host() {
 valid_token() { [[ "$1" =~ ^[A-Za-z0-9+/=._@:-]{8,128}$ ]]; }
 valid_ports_csv() { [[ "$1" =~ ^[0-9a-zA-Z.,:\>=_-]*$ ]] && [ "${#1}" -le 512 ]; }
 valid_mode() { case "$1" in forward|proxy) return 0;; *) return 1;; esac; }
+valid_gost_tr() {
+  case "$1" in tcp|tls|mtls|ws|wss|mws|quic|kcp|grpc) return 0;; *) return 1;; esac
+}
+# gost carries the relay protocol over a transport; +m variants multiplex.
+gost_scheme() {
+  case "$1" in
+    tls)  echo "relay+tls" ;;  mtls) echo "relay+mtls" ;;
+    ws)   echo "relay+ws" ;;   wss)  echo "relay+wss" ;;
+    mws)  echo "relay+mws" ;;  quic) echo "relay+quic" ;;
+    kcp)  echo "relay+kcp" ;;  grpc) echo "relay+grpc" ;;
+    *)    echo "relay" ;;
+  esac
+}
+gost_tr_hint() {
+  case "$1" in
+    tcp)  echo "plain, fastest, fingerprintable" ;;
+    tls)  echo "encrypted, one conn per stream" ;;
+    mtls) echo "encrypted + multiplexed" ;;
+    ws)   echo "websocket, plain - cdn friendly" ;;
+    wss)  echo "websocket over tls - cdn ok" ;;
+    mws)  echo "websocket, multiplexed, plain" ;;
+    quic) echo "udp based, good on lossy paths" ;;
+    kcp)  echo "udp based, aggressive retransmit" ;;
+    grpc) echo "http/2 framing, like grpc" ;;
+    *)    echo "" ;;
+  esac
+}
 # Proxy credentials are interpolated into a socks5://user:pass@host:port url and
 # into a systemd EnvironmentFile, so keep them clear of : @ / and of anything a
 # shell would look at twice.
@@ -361,20 +397,28 @@ place_core() {
   return 0
 }
 screen_core() {
-  header "CORE"
+  header "ENGINES"
   local arch tag url
   arch="$(arch_tag)"
   [ "$arch" = unsupported ] && { bad "unsupported cpu: $(uname -m)"; pause; return; }
   mkdir -p "$LOCAL_CORE_DIR"
-  top
-  kv "installed" "$W$(core_version_short)$N"
-  kv "arch"      "$W linux_$arch$N"
-  mid
+  top; sect "INSTALLED"; blank
+  kv "backhaul" "$W$(core_version_short)$N $D$BIN_PATH$N"
+  kv "gost"     "$W$(gost_version)$N $D$GOST_BIN$N"
+  kv "arch"     "$Wlinux_$arch$N"
+  mid; sect "BACKHAUL CORE"
   item 1 "From GitHub" "latest release"
   item 2 "From $LOCAL_CORE_DIR" "offline"
   item 3 "From custom URL" ""
+  mid; sect "GOST"
+  item g "Install / reinstall gost" "pinned to v$GOST_VER"
   item 0 "Back" ""
   bot; echo; getkey
+  case "$KEY" in
+    g|G) if gost_install; then ok "gost $(gost_version) installed"; ensure_units
+         else bad "gost was not installed"; fi
+         pause; return ;;
+  esac
   case "$KEY" in
     1) info "querying github"
        tag="$(gh_latest_tag)"
@@ -428,7 +472,7 @@ screen_core() {
 restart_all_prompt() {
   local l t; l="$(tunnel_names)"; [ -z "$l" ] && return
   yesno "restart all tunnels now?" y || return
-  for t in $l; do systemctl restart "backhaul@$t" 2>/dev/null && ok "$t" || bad "$t"; done
+  for t in $l; do systemctl restart "$(tun_unit "$t")" 2>/dev/null && ok "$t" || bad "$t"; done
 }
 
 # ================================================================ SYSTEMD ==
@@ -455,6 +499,33 @@ LimitNOFILE=1048576
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=backhaul-%i
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  # The gost engine takes its whole argument list from the tunnel's env file.
+  # systemd word-splits an unbraced $VAR, which is why it is written that way.
+  cat > "$GOST_UNIT" <<EOF
+[Unit]
+Description=Eris Tunnel 2 - gost tunnel (%i)
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+EnvironmentFile=$TUN_DIR/%i/gost.env
+ExecStart=$GOST_BIN \$GOST_ARGS
+Restart=always
+TimeoutStopSec=10
+KillMode=mixed
+KillSignal=SIGTERM
+SendSIGKILL=yes
+RestartSec=5
+LimitNOFILE=1048576
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=eris-gost-%i
 
 [Install]
 WantedBy=multi-user.target
@@ -506,8 +577,10 @@ gost_install() {
   local a url tmp d bin
   a="$(gost_arch)"
   [ "$a" = unsupported ] && { bad "no gost build for $(uname -m)"; return 1; }
-  info "looking for a gost release for linux/$a"
-  url="$(gh_asset_url_repo "$GOST_REPO" "$a")" || { bad "no matching asset - check this server's access to github"; return 1; }
+  # Pinned rather than "latest": the tunnel and proxy argument shapes below are
+  # the ones this release documents.
+  url="https://github.com/$GOST_REPO/releases/download/v$GOST_VER/gost_${GOST_VER}_linux_${a}.tar.gz"
+  info "fetching gost $GOST_VER for linux/$a"
   dim "${url##*/}"
   tmp="$(mktemp)" || return 1
   if ! curl -fsSL --retry 3 --max-time 120 -o "$tmp" "$url"; then
@@ -651,13 +724,22 @@ purge_legacy_socks() {
 }
 
 set_restart_timer() {
-  local name="$1" every="$2" dir; dir="/etc/systemd/system/backhaul-restart@$name.timer.d"
+  local name="$1" every="$2" dir sdir
+  dir="/etc/systemd/system/backhaul-restart@$name.timer.d"
+  sdir="/etc/systemd/system/backhaul-restart@$name.service.d"
   if [ "$every" = off ]; then
     systemctl disable --now "backhaul-restart@$name.timer" >/dev/null 2>&1
-    rm -rf "$dir"; systemctl daemon-reload 2>/dev/null; return 0
+    rm -rf "$dir" "$sdir"; systemctl daemon-reload 2>/dev/null; return 0
   fi
   mkdir -p "$dir"
   printf '[Timer]\nOnUnitActiveSec=\nOnUnitActiveSec=%s\nOnBootSec=\nOnBootSec=%s\n' "$every" "$every" > "$dir/interval.conf"
+  # The template restarts backhaul@%i; a gost tunnel needs its own unit named.
+  if [ "$(tun_engine "$name")" = gost ]; then
+    mkdir -p "$sdir"
+    printf '[Service]\nExecStart=\nExecStart=/bin/systemctl restart eris-gost@%s.service\n' "$name" > "$sdir/engine.conf"
+  else
+    rm -rf "$sdir"
+  fi
   systemctl daemon-reload 2>/dev/null
   systemctl enable --now "backhaul-restart@$name.timer" >/dev/null 2>&1
 }
@@ -756,6 +838,57 @@ transport_hint() {
     udp)    echo "for hysteria / tuic only" ;;
   esac
 }
+engine_hint() {
+  case "$1" in
+    gost) echo "relay + rtcp, more transports" ;;
+    *)    echo "the classic core, profiles apply" ;;
+  esac
+}
+pick_engine() {
+  { echo; top; sect "TUNNEL ENGINE"
+    row "$(printf '%swhich program actually carries the tunnel. both sides of%s' "$D" "$N")"
+    row "$(printf '%sa tunnel must run the same one.%s' "$D" "$N")"; blank
+    item 1 "Backhaul" "$(engine_hint backhaul)"
+    item 2 "gost" "$(engine_hint gost)"
+    bot; echo; } >&2
+  local k; printf '  %s▸%s Engine [1]: ' "$C" "$N" >&2; read -rsn1 k; printf '%s\n' "$k" >&2
+  case "$k" in 2) echo gost ;; *) echo backhaul ;; esac
+}
+engine_ensure() { # <engine>
+  if [ "$1" = gost ]; then
+    [ -n "$(gost_path)" ] && return 0
+    info "the gost engine needs the gost binary"
+    gost_install || return 1
+    ok "gost $(gost_version) installed"
+    ensure_units
+    return 0
+  fi
+  [ -x "$BIN_PATH" ] && return 0
+  bad "the backhaul core is not installed - main menu [6]"
+  return 1
+}
+pick_gost_tr() {
+  { echo; top; sect "GOST TRANSPORT"
+    row "$(printf '%sthe relay protocol is the same either way; this is what%s' "$D" "$N")"
+    row "$(printf '%scarries it. set the same one on both servers.%s' "$D" "$N")"; blank
+    item 1 "mtls"  "$(gost_tr_hint mtls)"
+    item 2 "tls"   "$(gost_tr_hint tls)"
+    item 3 "tcp"   "$(gost_tr_hint tcp)"
+    item 4 "mws"   "$(gost_tr_hint mws)"
+    item 5 "wss"   "$(gost_tr_hint wss)"
+    item 6 "ws"    "$(gost_tr_hint ws)"
+    item 7 "quic"  "$(gost_tr_hint quic)"
+    item 8 "kcp"   "$(gost_tr_hint kcp)"
+    item 9 "grpc"  "$(gost_tr_hint grpc)"
+    bot; echo; } >&2
+  local k; printf '  %s▸%s Transport [1]: ' "$C" "$N" >&2; read -rsn1 k; printf '%s\n' "$k" >&2
+  case "$k" in
+    2) echo tls ;; 3) echo tcp ;; 4) echo mws ;; 5) echo wss ;;
+    6) echo ws ;;  7) echo quic ;; 8) echo kcp ;; 9) echo grpc ;;
+    *) echo mtls ;;
+  esac
+}
+
 pick_transport() {
   { echo; top; sect "TRANSPORT"
     row "$(printf '%smust be identical on both servers%s' "$D" "$N")"; blank
@@ -1095,6 +1228,70 @@ write_client_config() {
   chmod 600 "$dir/config.toml"
 }
 
+# gost takes no config file for this: the whole argument list goes into the
+# tunnel's env file and systemd word-splits it into argv.
+gost_tunnel_args() { # <dir>  (needs load_meta first)
+  local sch out="" lport target fwd
+  sch="$(gost_scheme "$GOST_TR")"
+  if [ "$ROLE" = server ]; then
+    # bind=true is what lets the kharej side ask for ports on this server, so
+    # the relay must always ask for credentials.
+    printf -- '-L %s://%s:%s@:%s?bind=true' "$sch" "$GOST_USER" "$TOKEN" "$PORT"
+    return 0
+  fi
+  if [ "${MODE:-forward}" = proxy ]; then
+    out="-L rtcp://127.0.0.1:$BRIDGE_PORT/127.0.0.1:$EXIT_PORT"
+  else
+    while IFS=$'\t' read -r lport target; do
+      [ -z "$lport" ] && continue
+      valid_port "$lport" || continue
+      if [ -n "$target" ] && [ "$target" != "-" ]; then fwd="$target"
+      else fwd="127.0.0.1:$lport"; fi
+      out="${out:+$out }-L rtcp://:$lport/$fwd"
+    done < "$1/ports.list"
+  fi
+  [ -n "$out" ] || return 1
+  printf -- '%s -F %s://%s:%s@%s:%s' "$out" "$sch" "$GOST_USER" "$TOKEN" "$PEER_IP" "$PORT"
+}
+write_gost_env() { # <dir>
+  local args
+  args="$(gost_tunnel_args "$1")" || return 1
+  printf 'GOST_ARGS=%s\n' "$args" > "$1/gost.env"
+  chmod 600 "$1/gost.env"
+  { echo "# Eris Tunnel 2 | $([ "$ROLE" = server ] && echo 'IRAN (relay)' || echo 'KHAREJ (forwarder)') | $DEV_ID"
+    echo "# $(date '+%F %T') | engine: gost $GOST_VER | transport: $GOST_TR"
+    echo
+    echo "$GOST_BIN \\"
+    printf '%s' "$args" | sed 's/ -L /\n  -L /g; s/ -F /\n  -F /g; s/^-L /  -L /' | sed '$!s/$/ \\/'
+    echo
+  } > "$1/gost.cmd"
+  chmod 600 "$1/gost.cmd"
+  return 0
+}
+# ports.list is typed on IRAN but a gost tunnel needs it on KHAREJ, where the
+# rtcp listeners live. The pair code carries it across.
+ports_from_csv() { # <csv> <outfile>
+  local csv="$1" out="$2" it lport target _a
+  : > "$out"
+  [ -z "$csv" ] && return 0
+  IFS=',' read -r -a _a <<<"$csv"
+  for it in "${_a[@]}"; do
+    [ -z "$it" ] && continue
+    if [[ "$it" == *">"* ]]; then lport="${it%%>*}"; target="${it#*>}"
+    else lport="$it"; target="-"; fi
+    valid_port "$lport" || continue
+    printf '%s\t%s\n' "$lport" "$target" >> "$out"
+  done
+  return 0
+}
+tunnel_sane() { # <name>
+  if [ "$(tun_engine "$1")" = gost ]; then
+    [ -s "$TUN_DIR/$1/gost.env" ] && grep -q '^GOST_ARGS=-L ' "$TUN_DIR/$1/gost.env"
+  else
+    config_sane "$TUN_DIR/$1/config.toml"
+  fi
+}
+
 config_sane() {
   local f="$1"
   [ -s "$f" ] || return 1
@@ -1133,6 +1330,8 @@ TLS_CERT="$TLS_CERT"
 TLS_KEY="$TLS_KEY"
 PEER_IP="$PEER_IP"
 PUB_IP="$PUB_IP"
+ENGINE="${ENGINE:-backhaul}"
+GOST_TR="${GOST_TR:-}"
 MODE="${MODE:-forward}"
 PROXY_AUTH="${PROXY_AUTH:-false}"
 PROXY_PORT="${PROXY_PORT:-}"
@@ -1151,7 +1350,8 @@ META_KEYS="NAME ROLE PORT TOKEN TRANSPORT CHANNEL_SIZE MUX_CON POOL AGGRESSIVE \
 ACCEPT_UDP NODELAY PROFILE OV_POOL OV_CHANNEL OV_HEARTBEAT OV_KEEPALIVE OV_MUXCON \
 OV_AGGRESSIVE OV_RETRY OV_DIAL OV_NODELAY OV_FRAME OV_RECVBUF OV_STREAMBUF OV_MUXVER \
 EDGE_IP PEER_IP PUB_IP TLS_CERT TLS_KEY LOGLEVEL RESTART_EVERY \
-MODE PROXY_AUTH PROXY_PORT BRIDGE_PORT EXIT_PORT PROXY_USER PROXY_PASS"
+ENGINE GOST_TR MODE PROXY_AUTH PROXY_PORT BRIDGE_PORT EXIT_PORT \
+PROXY_USER PROXY_PASS"
 
 meta_set() { # <tunnel> <key> <value>
   local f="$TUN_DIR/$1/meta.conf"
@@ -1171,6 +1371,7 @@ load_meta() {
   OV_FRAME=""; OV_RECVBUF=""; OV_STREAMBUF=""; OV_MUXVER=""
   EDGE_IP=""; PEER_IP=""; PUB_IP=""
   TLS_CERT=""; TLS_KEY=""
+  ENGINE="backhaul"; GOST_TR="$DEFAULT_GOST_TR"
   MODE="forward"; PROXY_AUTH="false"
   PROXY_PORT=""; BRIDGE_PORT=""; EXIT_PORT=""
   PROXY_USER=""; PROXY_PASS=""
@@ -1191,6 +1392,8 @@ load_meta() {
   # Mode and proxy settings can have arrived in a pair code, so re-check them on
   # every load instead of trusting what is on disk. A tunnel that does not have
   # everything proxy mode needs is loaded as a plain forward, never half of one.
+  case "$ENGINE" in gost|backhaul) ;; *) ENGINE=backhaul ;; esac
+  valid_gost_tr "$GOST_TR" || GOST_TR="$DEFAULT_GOST_TR"
   valid_mode "$MODE" || MODE=forward
   [ "$PROXY_AUTH" = true ] || PROXY_AUTH=false
   valid_port "$PROXY_PORT"  || PROXY_PORT=""
@@ -1220,11 +1423,13 @@ load_meta() {
   local _k
   for _k in PROFILE OV_POOL OV_CHANNEL OV_HEARTBEAT OV_KEEPALIVE OV_MUXCON \
             OV_AGGRESSIVE OV_RETRY OV_DIAL OV_NODELAY OV_FRAME OV_RECVBUF \
-            OV_STREAMBUF OV_MUXVER MODE PROXY_AUTH PROXY_PORT BRIDGE_PORT \
-            EXIT_PORT PROXY_USER PROXY_PASS; do
+            OV_STREAMBUF OV_MUXVER ENGINE GOST_TR MODE PROXY_AUTH PROXY_PORT \
+            BRIDGE_PORT EXIT_PORT PROXY_USER PROXY_PASS; do
     grep -q "^$_k=" "$dir/meta.conf" 2>/dev/null && continue
     case "$_k" in
       PROFILE)    printf 'PROFILE="%s"\n' "$PROFILE" >> "$dir/meta.conf" ;;
+      ENGINE)     printf 'ENGINE="backhaul"\n' >> "$dir/meta.conf" ;;
+      GOST_TR)    printf 'GOST_TR="%s"\n' "$DEFAULT_GOST_TR" >> "$dir/meta.conf" ;;
       MODE)       printf 'MODE="forward"\n' >> "$dir/meta.conf" ;;
       PROXY_AUTH) printf 'PROXY_AUTH="false"\n' >> "$dir/meta.conf" ;;
       *)          printf '%s=""\n' "$_k" >> "$dir/meta.conf" ;;
@@ -1236,6 +1441,10 @@ load_meta() {
 regen_config() {
   local n="$1"
   load_meta "$n" || return 1
+  if [ "$ENGINE" = gost ]; then
+    write_gost_env "$TUN_DIR/$n"
+    return
+  fi
   if [ "$ROLE" = server ]; then
     if is_tls "$TRANSPORT" && { [ -z "$TLS_CERT" ] || [ ! -s "$TLS_CERT" ]; }; then
       make_self_signed "$TUN_DIR/$n"
@@ -1268,8 +1477,9 @@ pretty_ports() {
 tr_idx() { case "$1" in tcp) echo 1 ;; ws) echo 3 ;; wsmux) echo 4 ;; wss) echo 5 ;; wssmux) echo 6 ;; udp) echo 7 ;; *) echo 2 ;; esac; }
 idx_tr() { case "$1" in 1) echo tcp ;; 3) echo ws ;; 4) echo wsmux ;; 5) echo wss ;; 6) echo wssmux ;; 7) echo udp ;; *) echo tcpmux ;; esac; }
 
-# B4|IRAN_IP|PORT|TOKEN|TRANSPORT#|PROFILE|RESTART|PORTS|MODE|EXIT|PPORT|USER|PASS
-# MODE is f or p.  B3, B2 and B1 are still read so older codes keep working;
+# B5|IRAN_IP|PORT|TOKEN|TRANSPORT#|PROFILE|RESTART|PORTS|MODE|EXIT|PPORT|USER|
+#    PASS|ENGINE|GOST_TR       - ENGINE is b or g, MODE is f or p.
+# B4, B3, B2 and B1 are still read so older codes keep working;
 # B3 carried an earlier proxy layout that no longer exists, and its extra
 # fields are ignored rather than half-applied.
 make_pair_code() {
@@ -1281,19 +1491,23 @@ make_pair_code() {
       pu="${PROXY_USER:-}"; ps="${PROXY_PASS:-}"
     fi
   fi
-  local p="B4|$PUB_IP|$PORT|$TOKEN|$(tr_idx "$TRANSPORT")|${PROFILE:-balanced}|${RESTART_EVERY:-off}|$(ports_csv "$1")|$md|$ex|$pp|$pu|$ps"
+  local en=b; [ "${ENGINE:-backhaul}" = gost ] && en=g
+  local p="B5|$PUB_IP|$PORT|$TOKEN|$(tr_idx "$TRANSPORT")|${PROFILE:-balanced}|${RESTART_EVERY:-off}|$(ports_csv "$1")|$md|$ex|$pp|$pu|$ps|$en|${GOST_TR:-$DEFAULT_GOST_TR}"
   printf 'ETN-%s' "$(printf '%s' "$p" | b64enc)"
 }
 parse_pair_code() {
-  local code="$1" raw ver ti md _x
+  local code="$1" raw ver ti md en _x
   code="${code#ETN-}"; code="${code#DBH-}"; code="$(tr -d '[:space:]' <<<"$code")"
   raw="$(printf '%s' "$code" | b64dec)" || return 1
   PC_IP=""; PC_PORT=""; PC_TOKEN=""; PC_TR=""; PC_POOL=""; PC_PROFILE="balanced"
   PC_RESTART="off"; PC_PORTS=""
   PC_MODE="forward"; PC_EXIT=""; PC_PPORT=""; PC_PUSER=""; PC_PPASS=""
-  PC_PAUTH=false
-  md=f
-  if [[ "$raw" == B4\|* ]]; then
+  PC_PAUTH=false; PC_ENGINE=backhaul; PC_GTR="$DEFAULT_GOST_TR"
+  md=f; en=b
+  if [[ "$raw" == B5\|* ]]; then
+    IFS='|' read -r ver PC_IP PC_PORT PC_TOKEN ti PC_PROFILE PC_RESTART PC_PORTS \
+                     md PC_EXIT PC_PPORT PC_PUSER PC_PPASS en PC_GTR <<<"$raw"
+  elif [[ "$raw" == B4\|* ]]; then
     IFS='|' read -r ver PC_IP PC_PORT PC_TOKEN ti PC_PROFILE PC_RESTART PC_PORTS \
                      md PC_EXIT PC_PPORT PC_PUSER PC_PPASS <<<"$raw"
   elif [[ "$raw" == B3\|* ]]; then
@@ -1311,6 +1525,8 @@ parse_pair_code() {
   # A pair code is pasted in from outside, so treat every field as hostile.
   valid_ports_csv "$PC_PORTS" || return 1
   valid_token "$PC_TOKEN" || return 1
+  case "$en" in g) PC_ENGINE=gost ;; *) PC_ENGINE=backhaul ;; esac
+  valid_gost_tr "$PC_GTR" || PC_GTR="$DEFAULT_GOST_TR"
   if [ "$md" = p ]; then
     PC_MODE=proxy
     valid_port "$PC_EXIT" || return 1
@@ -1343,7 +1559,9 @@ show_pair_code() {
 PARTIAL_TUNNEL=""
 
 tunnel_complete() {
-  [ -s "$TUN_DIR/$1/meta.conf" ] && [ -s "$TUN_DIR/$1/config.toml" ]
+  [ -s "$TUN_DIR/$1/meta.conf" ] || return 1
+  if [ "$(tun_engine "$1")" = gost ]; then [ -s "$TUN_DIR/$1/gost.env" ]
+  else [ -s "$TUN_DIR/$1/config.toml" ]; fi
 }
 
 # A stuck unit sits in "deactivating" and every systemctl call blocks behind it,
@@ -1351,13 +1569,13 @@ tunnel_complete() {
 stop_tunnel_hard() {
   local n="$1"
   proxy_down "$n"
-  systemctl disable "backhaul@$n" >/dev/null 2>&1
-  if ! timeout 15 systemctl stop "backhaul@$n" >/dev/null 2>&1; then
+  systemctl disable "$(tun_unit "$n")" >/dev/null 2>&1
+  if ! timeout 15 systemctl stop "$(tun_unit "$n")" >/dev/null 2>&1; then
     warn "service did not stop in time - forcing it"
-    systemctl kill -s SIGKILL "backhaul@$n" >/dev/null 2>&1
+    systemctl kill -s SIGKILL "$(tun_unit "$n")" >/dev/null 2>&1
     sleep 1
   fi
-  systemctl reset-failed "backhaul@$n" >/dev/null 2>&1
+  systemctl reset-failed "$(tun_unit "$n")" >/dev/null 2>&1
   return 0
 }
 
@@ -1402,7 +1620,7 @@ sweep_web_dashboard() {
   if yesno "turn it off? this regenerates their config and restarts them" y; then
     for n in "${stale[@]}"; do
       if regen_config "$n"; then
-        systemctl restart "backhaul@$n" >/dev/null 2>&1
+        systemctl restart "$(tun_unit "$n")" >/dev/null 2>&1
         ok "$n - dashboard off"
       else bad "$n - config generation failed"; fi
     done
@@ -1493,11 +1711,30 @@ fmt_traffic() { [ "${1:--1}" -lt 0 ] 2>/dev/null && printf '' || human_bytes "$1
 
 # =========================================================== TUNNEL BASICS =
 tunnel_names() { ls -1 "$TUN_DIR" 2>/dev/null; }
+# Which engine a tunnel runs, read straight off meta.conf so it is right even
+# when no load_meta has happened yet - every systemd call goes through this.
+tun_engine() {
+  local e
+  e="$(grep -m1 '^ENGINE=' "$TUN_DIR/$1/meta.conf" 2>/dev/null | cut -d'"' -f2)"
+  case "$e" in gost) echo gost ;; *) echo backhaul ;; esac
+}
+tun_unit() {
+  # the literal unit names live here and nowhere else
+  if [ "$(tun_engine "$1")" = gost ]; then printf 'eris-gost@%s
+' "$1"
+  else printf 'backhaul@%s
+' "$1"; fi
+}
+engine_name() { case "$1" in gost) echo "gost" ;; *) echo "backhaul" ;; esac; }
+engine_bin()  { if [ "$1" = gost ]; then gost_path; else echo "$BIN_PATH"; fi; }
+engine_ready() { # <engine>
+  if [ "$1" = gost ]; then [ -n "$(gost_path)" ]; else [ -x "$BIN_PATH" ]; fi
+}
 tunnel_count() { tunnel_names | grep -c . ; }
-svc_raw() { systemctl is-active "backhaul@$1" 2>/dev/null; }
+svc_raw() { systemctl is-active "$(tun_unit "$1")" 2>/dev/null; }
 svc_uptime_short() {
   local ts t n d
-  ts="$(systemctl show "backhaul@$1" -p ActiveEnterTimestamp --value 2>/dev/null)"
+  ts="$(systemctl show "$(tun_unit "$1")" -p ActiveEnterTimestamp --value 2>/dev/null)"
   [ -z "$ts" ] && { echo "-"; return; }
   t="$(date -d "$ts" +%s 2>/dev/null)" || { echo "-"; return; }
   n="$(date +%s)"; d=$((n-t)); ((d<0)) && { echo "-"; return; }
@@ -1505,19 +1742,19 @@ svc_uptime_short() {
   elif [ "$d" -ge 3600 ];  then printf '%dh%02dm' $((d/3600)) $((d%3600/60))
   else printf '%dm%02ds' $((d/60)) $((d%60)); fi
 }
-drops_since() { journalctl -u "backhaul@$1" --since "$2" --no-pager 2>/dev/null \
+drops_since() { journalctl -u "$(tun_unit "$1")" --since "$2" --no-pager 2>/dev/null \
                 | grep -ciE 'disconnect|reconnect|connection failed|retry'; }
 
 start_tunnel() {
   local n="$1"
-  config_sane "$TUN_DIR/$n/config.toml" || { bad "generated config failed the sanity check"; return 1; }
-  systemctl enable "backhaul@$n" >/dev/null 2>&1
+  tunnel_sane "$n" || { bad "generated config failed the sanity check"; return 1; }
+  systemctl enable "$(tun_unit "$n")" >/dev/null 2>&1
   acct_sync "$n" >/dev/null 2>&1
-  systemctl restart "backhaul@$n" 2>/dev/null
+  systemctl restart "$(tun_unit "$n")" 2>/dev/null
   sleep 2
-  [ "$(svc_raw "$n")" = active ] && { ok "backhaul@$n running, enabled on boot"; return 0; }
+  [ "$(svc_raw "$n")" = active ] && { ok "$(tun_unit "$n") running, enabled on boot"; return 0; }
   bad "service failed to start"; echo
-  journalctl -u "backhaul@$n" -n 8 --no-pager -o cat 2>/dev/null | grep -viE '^\s*$' | tail -n 6 | sed "s/^/    $R/;s/\$/$N/"
+  journalctl -u "$(tun_unit "$n")" -n 8 --no-pager -o cat 2>/dev/null | grep -viE '^\s*$' | tail -n 6 | sed "s/^/    $R/;s/\$/$N/"
   return 1
 }
 
@@ -1566,12 +1803,15 @@ read_ports_into() {
 # ============================================================ CREATE IRAN ==
 screen_new_iran() {
   header "NEW TUNNEL - IRAN (server side)"
-  [ -x "$BIN_PATH" ] || { bad "core not installed - main menu [6]"; pause; return; }
   top; sect "ROLE CHECK"
   row "$(printf '%sIRAN is the [server]. it binds the port and exposes%s' "$D" "$N")"
   row "$(printf '%sthe ports your users connect to. the pair code is%s' "$D" "$N")"
   row "$(printf '%smade here and pasted on the kharej server.%s' "$D" "$N")"
-  bot; echo
+  bot
+
+  ENGINE="$(pick_engine)"
+  engine_ensure "$ENGINE" || { pause; return; }
+  GOST_TR="$DEFAULT_GOST_TR"
 
   local name
   while :; do
@@ -1616,7 +1856,7 @@ screen_new_iran() {
   row "$(printf '%swhat should this tunnel hand to your users?%s' "$D" "$N")"
   blank
   item 1 "Port forward" "ports here reach a panel on kharej"
-  item 2 "SOCKS5 proxy" "a proxy here, exits from the kharej ip"
+  item 2 "SOCKS5 proxy" "a proxy here, exits via kharej"
   bot; echo; getkey
   case "$KEY" in 2) MODE=proxy ;; *) MODE=forward ;; esac
 
@@ -1665,19 +1905,24 @@ screen_new_iran() {
 
   TRANSPORT="$DEFAULT_TRANSPORT"; CHANNEL_SIZE="$DEFAULT_CHANNEL"; MUX_CON="$DEFAULT_MUXCON"
   POOL="$DEFAULT_POOL"; AGGRESSIVE=false; ACCEPT_UDP=false; NODELAY=true
-  EDGE_IP=""
-  echo
-  PROFILE="$(pick_profile)"
-  if yesno "change the transport?" n; then
-    TRANSPORT="$(pick_transport)"
-    yesno "carry udp over tcp (accept_udp)?" n && ACCEPT_UDP=true
-  fi
-  dim "everything else follows the profile - pin values later in Tuning"
-  is_transport "$TRANSPORT" || TRANSPORT="$DEFAULT_TRANSPORT"
-  [ "$TRANSPORT" = udp ] && ACCEPT_UDP=false
-  if [ "$MODE" = proxy ] && [ "$TRANSPORT" = udp ]; then
-    warn "proxy mode carries tcp - switching the transport to $DEFAULT_TRANSPORT"
-    TRANSPORT="$DEFAULT_TRANSPORT"
+  EDGE_IP=""; PROFILE=balanced
+  if [ "$ENGINE" = gost ]; then
+    GOST_TR="$(pick_gost_tr)"
+    dim "profiles and per-value tuning are backhaul settings and do not apply"
+  else
+    echo
+    PROFILE="$(pick_profile)"
+    if yesno "change the transport?" n; then
+      TRANSPORT="$(pick_transport)"
+      yesno "carry udp over tcp (accept_udp)?" n && ACCEPT_UDP=true
+    fi
+    dim "everything else follows the profile - pin values later in Tuning"
+    is_transport "$TRANSPORT" || TRANSPORT="$DEFAULT_TRANSPORT"
+    [ "$TRANSPORT" = udp ] && ACCEPT_UDP=false
+    if [ "$MODE" = proxy ] && [ "$TRANSPORT" = udp ]; then
+      warn "proxy mode carries tcp - switching the transport to $DEFAULT_TRANSPORT"
+      TRANSPORT="$DEFAULT_TRANSPORT"
+    fi
   fi
   RESTART_EVERY="$(pick_restart)"
 
@@ -1686,20 +1931,30 @@ screen_new_iran() {
   NAME="$name"; ROLE=server; PEER_IP=""; LOGLEVEL=info
 
   TLS_CERT=""; TLS_KEY=""
-  if is_tls "$TRANSPORT"; then
+  # gost makes its own certificate for the tls transports, so nothing to pick
+  if [ "$ENGINE" != gost ] && is_tls "$TRANSPORT"; then
     choose_cert "$TUN_DIR/$name" || { discard_partial; pause; return; }
   fi
   write_meta "$TUN_DIR/$name"
   PARTIAL_TUNNEL=""
-  write_server_config "$TUN_DIR/$name"
+  if [ "$ENGINE" = gost ]; then
+    write_gost_env "$TUN_DIR/$name" || { bad "could not build the gost arguments"; pause; return; }
+  else
+    write_server_config "$TUN_DIR/$name"
+  fi
   ensure_units
   make_pair_code "$TUN_DIR/$name" > "$TUN_DIR/$name/pair.code"
   chmod 600 "$TUN_DIR/$name/pair.code"
 
   echo; top; sect "CREATED - $name"; blank
+  kv "engine"    "$W$ENGINE$N $D- $(engine_hint "$ENGINE")$N"
   kv "mode"      "$([ "$MODE" = proxy ] && printf '%ssocks5 proxy%s' "$W" "$N" || printf '%sport forward%s' "$W" "$N")"
   kv "listen"    "$W:$PORT$N"
-  kv "transport" "$W$TRANSPORT$N $D- $(transport_hint "$TRANSPORT")$N"
+  if [ "$ENGINE" = gost ]; then
+    kv "transport" "$W$GOST_TR$N $D- $(gost_tr_hint "$GOST_TR")$N"
+  else
+    kv "transport" "$W$TRANSPORT$N $D- $(transport_hint "$TRANSPORT")$N"
+  fi
   if [ "$MODE" = proxy ]; then
     kv "users"   "$W$(proxy_uri "$PUB_IP" "$PROXY_PORT")$N"
     kv "auth"    "$([ "$PROXY_AUTH" = true ] && printf '%s%s / %s%s' "$W" "$PROXY_USER" "$PROXY_PASS" "$N" || printf '%snone - open proxy%s' "$Y" "$N")"
@@ -1733,11 +1988,14 @@ screen_new_iran() {
 # ========================================================== CREATE KHAREJ ==
 screen_new_kharej() {
   header "NEW TUNNEL - KHAREJ (client side)"
-  [ -x "$BIN_PATH" ] || { bad "core not installed - main menu [6]"; pause; return; }
   top; sect "ROLE CHECK"
   row "$(printf '%sKHAREJ is the [client]. it dials out to iran and%s' "$D" "$N")"
   row "$(printf '%sneeds no inbound port. your panel lives here.%s' "$D" "$N")"
-  bot; echo
+  bot
+
+  ENGINE="$(pick_engine)"
+  engine_ensure "$ENGINE" || { pause; return; }
+  GOST_TR="$DEFAULT_GOST_TR"
 
   local name
   while :; do
@@ -1755,14 +2013,31 @@ screen_new_kharej() {
     ask "iran ip";     PC_IP="$ANS"
     ask "tunnel port" "$DEFAULT_PORT"; PC_PORT="$ANS"
     ask "token";       PC_TOKEN="$ANS"
-    PC_TR="$(pick_transport)"; PC_PROFILE="$(pick_profile)"; PC_RESTART=off; PC_PORTS=""
+    if [ "$ENGINE" = gost ]; then
+      PC_TR="$DEFAULT_TRANSPORT"; PC_GTR="$(pick_gost_tr)"; PC_PROFILE=balanced
+      ask "ports the iran server should open (comma separated)"; PC_PORTS="$ANS"
+      valid_ports_csv "$PC_PORTS" || { bad "invalid port list"; pause; return; }
+    else
+      PC_TR="$(pick_transport)"; PC_PROFILE="$(pick_profile)"; PC_GTR="$DEFAULT_GOST_TR"; PC_PORTS=""
+    fi
+    PC_ENGINE="$ENGINE"; PC_RESTART=off
     PC_MODE=forward; PC_EXIT=""; PC_PPORT=""; PC_PUSER=""; PC_PPASS=""; PC_PAUTH=false
     valid_host "$PC_IP" && valid_port "$PC_PORT" || { bad "invalid ip or port"; pause; return; }
     valid_token "$PC_TOKEN" || { bad "token must be 8-128 chars of A-Z a-z 0-9 + / = . _ @ : -"; pause; return; }
   fi
 
+  # The engine is not a preference on this side: it has to match what the iran
+  # server is actually running, and the pair code says which that is.
+  if [ "$PC_ENGINE" != "$ENGINE" ]; then
+    warn "that pair code comes from a $PC_ENGINE tunnel - using $PC_ENGINE here too"
+    ENGINE="$PC_ENGINE"
+    engine_ensure "$ENGINE" || { pause; return; }
+  fi
+  GOST_TR="$PC_GTR"
+
   echo; top; sect "PAIRED WITH"; blank
   kv "iran"      "$W$PC_IP:$PC_PORT$N"
+  kv "engine"    "$W$ENGINE$N$([ "$ENGINE" = gost ] && printf ' %s- %s%s' "$D" "$GOST_TR" "$N")"
   kv "mode"      "$([ "$PC_MODE" = proxy ] && printf '%ssocks5 proxy%s' "$W" "$N" || printf '%sport forward%s' "$W" "$N")"
   kv "transport" "$W$PC_TR$N"
   kv "profile"   "$W$(profile_name "$PC_PROFILE")$N $D$(profile_hint "$PC_PROFILE")$N"
@@ -1783,7 +2058,10 @@ screen_new_kharej() {
     fi ;;
   esac
   mkdir -p "$TUN_DIR/$name"; PARTIAL_TUNNEL="$name"
-  : > "$TUN_DIR/$name/ports.list"
+  # backhaul learns the ports through the tunnel; gost opens them from here, so
+  # this side needs the list the pair code carried.
+  if [ "$ENGINE" = gost ]; then ports_from_csv "$PC_PORTS" "$TUN_DIR/$name/ports.list"
+  else : > "$TUN_DIR/$name/ports.list"; fi
   NAME="$name"; ROLE=client; PORT="$PC_PORT"; TOKEN="$PC_TOKEN"; TRANSPORT="$PC_TR"
   POOL="$PC_POOL"; PROFILE="$PC_PROFILE"; PEER_IP="$PC_IP"; PUB_IP=""; LOGLEVEL=info
   CHANNEL_SIZE="$DEFAULT_CHANNEL"; MUX_CON="$DEFAULT_MUXCON"
@@ -1794,12 +2072,23 @@ screen_new_kharej() {
 
   write_meta "$TUN_DIR/$name"
   PARTIAL_TUNNEL=""
-  write_client_config "$TUN_DIR/$name"
+  if [ "$ENGINE" = gost ]; then
+    if ! write_gost_env "$TUN_DIR/$name"; then
+      bad "no ports to forward - the pair code carried none"
+      dim "add them on the iran side and pair again"
+      pause; return
+    fi
+  else
+    write_client_config "$TUN_DIR/$name"
+  fi
   ensure_units
 
   echo; top; sect "CREATED - $name"; blank
+  kv "engine"    "$W$ENGINE$N"
   kv "dials"     "$W$PEER_IP:$PORT$N"
-  kv "transport" "$W$TRANSPORT$N"
+  kv "transport" "$W$([ "$ENGINE" = gost ] && echo "$GOST_TR" || echo "$TRANSPORT")$N"
+  [ "$ENGINE" = gost ] && [ "$MODE" != proxy ] && \
+    kv "opens"   "$W$(pretty_ports "$(ports_csv "$TUN_DIR/$name")")$N $D on the iran server$N"
   bot; echo
   start_tunnel "$name" || { pause; return; }
   set_restart_timer "$name" "$RESTART_EVERY"
@@ -1901,9 +2190,16 @@ screen_ports() {
       3) regen_config "$name" || { bad "config generation failed"; pause; continue; }
          acct_sync "$name" >/dev/null 2>&1
          make_pair_code "$dir" > "$dir/pair.code"
-         systemctl restart "backhaul@$name" 2>/dev/null; sleep 2
+         systemctl restart "$(tun_unit "$name")" 2>/dev/null; sleep 2
          [ "$(svc_raw "$name")" = active ] && ok "applied and running" || bad "did not come up"
-         warn "ports changed - the kharej side does not need re-pairing"
+         if [ "$ENGINE" = gost ]; then
+           # gost opens these ports from the kharej end, so that side has to be
+           # told about them - unlike backhaul, where the server owns the list.
+           warn "ports changed - re-pair the kharej side so it opens them"
+           show_pair_code "$name"
+         else
+           warn "ports changed - the kharej side does not need re-pairing"
+         fi
          pause ;;
       0|_) return ;;
     esac
@@ -1917,7 +2213,7 @@ proxy_apply_iran() { # <name> - rewrite config, re-pair, restart the tunnel
   load_meta "$1"
   make_pair_code "$TUN_DIR/$1" > "$TUN_DIR/$1/pair.code"
   chmod 600 "$TUN_DIR/$1/pair.code"
-  systemctl restart "backhaul@$1" 2>/dev/null; sleep 2
+  systemctl restart "$(tun_unit "$1")" 2>/dev/null; sleep 2
   [ "$(svc_raw "$1")" = active ]
 }
 
@@ -2232,7 +2528,7 @@ profile_apply_now() { # <name>
     make_pair_code "$TUN_DIR/$1" > "$TUN_DIR/$1/pair.code"
     chmod 600 "$TUN_DIR/$1/pair.code"
   fi
-  systemctl restart "backhaul@$1" 2>/dev/null; sleep 2
+  systemctl restart "$(tun_unit "$1")" 2>/dev/null; sleep 2
   [ "$(svc_raw "$1")" = active ]
 }
 
@@ -2293,7 +2589,7 @@ screen_profile() {
       ok "profile: $(profile_name "$np") - applied and running"
     else
       bad "the tunnel did not come back up on $(profile_name "$np")"
-      dim "journalctl -u backhaul@$name -n 30"
+      dim "journalctl -u $(tun_unit "$name") -n 30"
     fi
     [ "$(ov_count)" -gt 0 ] && warn "$(ov_count) pinned value(s) still override part of it"
     if [ "$ROLE" = server ]; then
@@ -2348,7 +2644,7 @@ screen_tuning() {
         regen_config "$name" || { bad "config generation failed"; pause; return; }
         load_meta "$name"
         [ "$ROLE" = server ] && make_pair_code "$TUN_DIR/$name" > "$TUN_DIR/$name/pair.code"
-        systemctl restart "backhaul@$name" 2>/dev/null; sleep 2
+        systemctl restart "$(tun_unit "$name")" 2>/dev/null; sleep 2
         echo
         [ "$(svc_raw "$name")" = active ] && ok "applied and running" || bad "did not come up"
         [ "$ROLE" = server ] && show_pair_code "$name"
@@ -2384,9 +2680,10 @@ screen_manage() {
     top; sect "STATUS"; blank
     kv "state"     "$(case "$_st" in active) badge ACTIVE "$BG_OK$W" ;; failed) badge FAILED "$BG_ERR$W" ;; *) badge "${_st:-?}" "$BG_WARN$W" ;; esac)  $D uptime $(svc_uptime_short "$name")$N"
     kv "role"      "$W$([ "$ROLE" = server ] && echo "IRAN (server)" || echo "KHAREJ (client)")$N"
+    kv "engine"    "$W$ENGINE$N $D$([ "$ENGINE" = gost ] && echo "gost $GOST_VER" || echo "$(core_version_short)")$N"
     kv "mode"      "$([ "$MODE" = proxy ] && printf '%ssocks5 proxy%s' "$W" "$N" || printf '%sport forward%s' "$W" "$N")"
     [ "$ROLE" = server ] && kv "listen" "$W:$PORT$N" || kv "dials" "$W$PEER_IP:$PORT$N"
-    kv "transport" "$W$TRANSPORT$N"
+    kv "transport" "$W$([ "$ENGINE" = gost ] && echo "$GOST_TR" || echo "$TRANSPORT")$N"
     kv "profile"   "$W$(profile_name "${PROFILE:-balanced}")$N $D$(profile_hint "${PROFILE:-balanced}")$N"
     kv "events/1h" "$W$(drops_since "$name" '1 hour ago')$N"
     local _ti _to; read -r _ti _to <<<"$(tunnel_traffic "$name")"
@@ -2413,7 +2710,7 @@ screen_manage() {
     mid; sect "CONFIGURE"
     [ "$ROLE" = server ] && [ "$MODE" != proxy ] && item 4 "Ports" "user-facing ports"
     item 9 "SOCKS5 proxy" "$([ "$MODE" = proxy ] && echo "on - $([ "$ROLE" = server ] && echo "port $PROXY_PORT" || echo "exit $EXIT_PORT")" || echo "off - hand the tunnel out as a proxy")"
-    item 5 "Profile" "$(profile_name "${PROFILE:-balanced}") - performance preset"
+    [ "$ENGINE" != gost ] && item 5 "Profile" "$(profile_name "${PROFILE:-balanced}") - performance preset"
     item 6 "Endpoint" "port or peer ip"
     item 7 "Scheduled restart" ""
     mid; sect "INSPECT"
@@ -2426,12 +2723,16 @@ screen_manage() {
     item 0 "Back" ""
     bot; echo; getkey
     case "$KEY" in
-      1) systemctl start "backhaul@$name" 2>/dev/null; sleep 1 ;;
-      2) systemctl stop "backhaul@$name" 2>/dev/null; sleep 1 ;;
-      3) systemctl restart "backhaul@$name" 2>/dev/null; sleep 2 ;;
+      1) systemctl start "$(tun_unit "$name")" 2>/dev/null; sleep 1 ;;
+      2) systemctl stop "$(tun_unit "$name")" 2>/dev/null; sleep 1 ;;
+      3) systemctl restart "$(tun_unit "$name")" 2>/dev/null; sleep 2 ;;
       4) if [ "$ROLE" = server ]; then screen_ports "$name"
          else info "user ports are configured on the IRAN server"; pause; fi ;;
-      5) screen_profile "$name" ;;
+      5) if [ "$ENGINE" = gost ]; then
+           info "profiles tune backhaul's pool and buffers - a gost tunnel has none"
+           dim "change the gost transport from [6] Endpoint"
+           pause
+         else screen_profile "$name"; fi ;;
       6) screen_endpoint "$name" ;;
       9) screen_proxy "$name" ;;
       s|S) speed_screen "$name" ;;
@@ -2443,13 +2744,16 @@ screen_manage() {
          sed -i "s|^RESTART_EVERY=.*|RESTART_EVERY=\"$ev\"|" "$TUN_DIR/$name/meta.conf"
          ensure_units; set_restart_timer "$name" "$ev"
          ok "scheduled restart: $ev"; pause ;;
-      8) header "CONFIG - $name"; sed 's/^/    /' "$TUN_DIR/$name/config.toml"; pause ;;
+      8) header "CONFIG - $name"
+         if [ "$ENGINE" = gost ]; then sed 's/^/    /' "$TUN_DIR/$name/gost.cmd" 2>/dev/null
+         else sed 's/^/    /' "$TUN_DIR/$name/config.toml" 2>/dev/null; fi
+         pause ;;
       p|P) [ "$ROLE" = server ] && show_pair_code "$name" || info "pair codes come from the IRAN side"
            pause ;;
       e|E) local ed=nano; command -v nano >/dev/null 2>&1 || ed=vi
            "$ed" "$TUN_DIR/$name/config.toml"
            if yesno "restart to apply?" y; then
-             systemctl restart "backhaul@$name" 2>/dev/null; sleep 2
+             systemctl restart "$(tun_unit "$name")" 2>/dev/null; sleep 2
              [ "$(svc_raw "$name")" = active ] && ok "running" || bad "did not come up"
            fi
            warn "hand edits are lost when the config is regenerated"
@@ -2473,13 +2777,19 @@ screen_endpoint() {
   top; sect "CURRENT"; blank
   kv "role" "$W$ROLE$N"
   kv "port" "$W$PORT$N"
+  [ "$ENGINE" = gost ] && kv "transport" "$W$GOST_TR$N"
   [ "$ROLE" = client ] && kv "iran ip" "$W$PEER_IP$N" || kv "public ip" "$W$PUB_IP$N"
   mid
   item 1 "Change tunnel port" "apply on both servers"
   item 2 "Change ip" ""
+  [ "$ENGINE" = gost ] && item 3 "Change gost transport" "apply on both servers"
   item 0 "Back" ""
   bot; echo; getkey
   case "$KEY" in
+    3) [ "$ENGINE" = gost ] || return
+       local ngt; ngt="$(pick_gost_tr)"
+       meta_set "$name" GOST_TR "$ngt"
+       warn "set transport=$ngt on the other server too" ;;
     1) ask "new tunnel port" "$PORT"
        valid_port "$ANS" || { bad "invalid port"; pause; return; }
        sed -i "s|^PORT=.*|PORT=\"$ANS\"|" "$TUN_DIR/$name/meta.conf" ;;
@@ -2492,7 +2802,7 @@ screen_endpoint() {
   regen_config "$name" || { bad "config generation failed"; pause; return; }
   load_meta "$name"
   [ "$ROLE" = server ] && make_pair_code "$TUN_DIR/$name" > "$TUN_DIR/$name/pair.code"
-  systemctl restart "backhaul@$name" 2>/dev/null; sleep 2
+  systemctl restart "$(tun_unit "$name")" 2>/dev/null; sleep 2
   echo
   [ "$(svc_raw "$name")" = active ] && ok "applied and running" || bad "did not come up"
   [ "$ROLE" = server ] && { warn "pair code changed - re-pair the kharej side"; show_pair_code "$name"; }
@@ -2623,16 +2933,16 @@ screen_logs() {
     bot; echo; getkey
     case "$KEY" in
       1) screen_connections "$name" ;;
-      2) clear; info "ctrl+c to exit"; journalctl -u "backhaul@$name" -f -n 30 --no-pager; pause ;;
-      3) header "LOG - $name"; journalctl -u "backhaul@$name" -n 80 --no-pager -o cat | sed 's/^/    /'; pause ;;
+      2) clear; info "ctrl+c to exit"; journalctl -u "$(tun_unit "$name")" -f -n 30 --no-pager; pause ;;
+      3) header "LOG - $name"; journalctl -u "$(tun_unit "$name")" -n 80 --no-pager -o cat | sed 's/^/    /'; pause ;;
       4) header "ERRORS - $name"
-         journalctl -u "backhaul@$name" --since '24 hours ago' --no-pager -o cat 2>/dev/null \
+         journalctl -u "$(tun_unit "$name")" --since '24 hours ago' --no-pager -o cat 2>/dev/null \
            | grep -iE 'error|fail|refused|timeout|disconnect' | tail -n 40 | sed "s/^/    $R/;s/\$/$N/"
          echo; dim "nothing above means no errors in the last 24h"
          pause ;;
       6) header "WHY IS IT DROPPING - $name"
          local L24 cc mux tok lis
-         L24="$(journalctl -u "backhaul@$name" --since '24 hours ago' --no-pager -o cat 2>/dev/null)"
+         L24="$(journalctl -u "$(tun_unit "$name")" --since '24 hours ago' --no-pager -o cat 2>/dev/null)"
          cc="$(grep -ci 'control channel has been closed by the client' <<<"$L24")"
          mux="$(grep -ciE 'mux|smux|frame' <<<"$L24")"
          tok="$(grep -ciE 'invalid token|authentication|unauthorized' <<<"$L24")"
@@ -2662,9 +2972,9 @@ screen_logs() {
          bot; pause ;;
       5) header "EVENT SUMMARY - $name"
          top; sect "LAST 24 HOURS"; blank
-         kv "restarts"     "$W$(journalctl -u "backhaul@$name" --since '24 hours ago' --no-pager 2>/dev/null | grep -c 'Started ')$N"
-         kv "reconnects"   "$W$(journalctl -u "backhaul@$name" --since '24 hours ago' --no-pager 2>/dev/null | grep -ciE 'reconnect|connection failed|retry')$N"
-         kv "errors"       "$W$(journalctl -u "backhaul@$name" --since '24 hours ago' --no-pager 2>/dev/null | grep -ciE 'error|fail')$N"
+         kv "restarts"     "$W$(journalctl -u "$(tun_unit "$name")" --since '24 hours ago' --no-pager 2>/dev/null | grep -c 'Started ')$N"
+         kv "reconnects"   "$W$(journalctl -u "$(tun_unit "$name")" --since '24 hours ago' --no-pager 2>/dev/null | grep -ciE 'reconnect|connection failed|retry')$N"
+         kv "errors"       "$W$(journalctl -u "$(tun_unit "$name")" --since '24 hours ago' --no-pager 2>/dev/null | grep -ciE 'error|fail')$N"
          blank
          kv "last hour"    "$W$(drops_since "$name" '1 hour ago') event(s)$N"
          kv "last 10 min"  "$W$(drops_since "$name" '10 min ago') event(s)$N"
@@ -2841,7 +3151,7 @@ speed_active() {
   if ! awk -F'\t' -v x="$port" '$1==x{f=1} END{exit !f}' "$dir/ports.list" 2>/dev/null; then
     printf '%s\t-\n' "$port" >> "$dir/ports.list"; added=1
     regen_config "$name" && acct_sync "$name" >/dev/null 2>&1
-    systemctl restart "backhaul@$name" 2>/dev/null; sleep 3
+    systemctl restart "$(tun_unit "$name")" 2>/dev/null; sleep 3
     ok "temporary port $port added"
   fi
 
@@ -2854,7 +3164,7 @@ speed_active() {
   if [ "$added" -eq 1 ]; then
     grep -v -P "^$port\t" "$dir/ports.list" > "$dir/ports.tmp" 2>/dev/null && mv -f "$dir/ports.tmp" "$dir/ports.list"
     regen_config "$name"
-    systemctl restart "backhaul@$name" 2>/dev/null; sleep 2
+    systemctl restart "$(tun_unit "$name")" 2>/dev/null; sleep 2
     dim "temporary port removed and the tunnel restored"
   fi
 
@@ -2894,7 +3204,7 @@ link_test() {
   maxs="${ANS:-180}"; [[ "$maxs" =~ ^[0-9]+$ ]] || maxs=180
   info "restarting and watching - press any key to stop"
   t0="$(date '+%Y-%m-%d %H:%M:%S')"
-  systemctl restart "backhaul@$name" 2>/dev/null
+  systemctl restart "$(tun_unit "$name")" 2>/dev/null
   start="$(date +%s)"; echo
   while :; do
     el=$(( $(date +%s) - start ))
@@ -2961,10 +3271,19 @@ health_check() {
     load_meta "$n"
     printf '  %s%s%s %s(%s)%s\n' "$W" "$n" "$N" "$D" "$([ "$ROLE" = server ] && echo iran || echo kharej)" "$N"
     [ "$(svc_raw "$n")" = active ] && ok "service active" || bad "service not active"
-    systemctl is-enabled --quiet "backhaul@$n" 2>/dev/null && ok "enabled on boot" || warn "not enabled on boot"
+    systemctl is-enabled --quiet "$(tun_unit "$n")" 2>/dev/null && ok "enabled on boot" || warn "not enabled on boot"
     if [ "$ROLE" = server ]; then
       ss -tln 2>/dev/null | grep -qE "[:.]$PORT\b" && ok "tunnel port $PORT is listening" || bad "tunnel port $PORT NOT listening"
-      if [ "$MODE" = proxy ]; then
+      if [ "$ENGINE" = gost ] && [ "$MODE" != proxy ]; then
+        # the relay opens these only while the kharej side is connected, so a
+        # missing one is a real signal rather than a configuration problem
+        local lp t miss=0
+        while IFS=$'\t' read -r lp t; do
+          [ -z "$lp" ] && continue
+          ss -tln 2>/dev/null | grep -qE "[:.]$lp\b" || { bad "port $lp not open - is kharej connected?"; miss=1; }
+        done < "$TUN_DIR/$n/ports.list"
+        [ "$miss" -eq 0 ] && ok "all user ports open"
+      elif [ "$MODE" = proxy ]; then
         ss -tln 2>/dev/null | grep -qE "127\.0\.0\.1:$BRIDGE_PORT\b" \
           && ok "bridge listening on 127.0.0.1:$BRIDGE_PORT" \
           || bad "bridge NOT listening on 127.0.0.1:$BRIDGE_PORT"
@@ -2983,6 +3302,11 @@ health_check() {
     else
       local ms; ms="$(tcp_probe_ms "$PEER_IP" "$PORT")"
       [ "$ms" -ge 0 ] 2>/dev/null && ok "iran server reachable (${ms}ms)" || bad "cannot reach $PEER_IP:$PORT"
+      if [ "$ENGINE" = gost ] && [ "$MODE" != proxy ]; then
+        local np; np="$(grep -c . "$TUN_DIR/$n/ports.list" 2>/dev/null)"
+        [ "${np:-0}" -gt 0 ] && ok "$np port(s) requested on the iran server" \
+          || bad "no ports to open - re-pair from the iran side"
+      fi
     fi
     if [ -n "$TLS_CERT" ]; then
       local cd; cd="$(cert_days_left "$TLS_CERT")"
@@ -3022,8 +3346,8 @@ screen_diag() {
     item 0 "Back" ""
     bot; echo; getkey
     case "$KEY" in
-      1) pick_tunnel && { clear; info "ctrl+c to exit"; journalctl -u "backhaul@$SELECTED" -f -n 30 --no-pager; }; pause ;;
-      2) pick_tunnel && { header "LOG - $SELECTED"; journalctl -u "backhaul@$SELECTED" -n 60 --no-pager -o cat | sed 's/^/    /'; }; pause ;;
+      1) pick_tunnel && { clear; info "ctrl+c to exit"; journalctl -u "$(tun_unit "$SELECTED")" -f -n 30 --no-pager; }; pause ;;
+      2) pick_tunnel && { header "LOG - $SELECTED"; journalctl -u "$(tun_unit "$SELECTED")" -n 60 --no-pager -o cat | sed 's/^/    /'; }; pause ;;
       3) health_check; pause ;;
       4) pick_tunnel && link_test "$SELECTED" ;;
       5) screen_fingerprint ;;
@@ -3047,7 +3371,7 @@ screen_diag() {
            load_meta "$SELECTED"
            local nl; [ "$LOGLEVEL" = debug ] && nl=info || nl=debug
            sed -i "s|^LOGLEVEL=.*|LOGLEVEL=\"$nl\"|" "$TUN_DIR/$SELECTED/meta.conf"
-           regen_config "$SELECTED"; systemctl restart "backhaul@$SELECTED" 2>/dev/null
+           regen_config "$SELECTED"; systemctl restart "$(tun_unit "$SELECTED")" 2>/dev/null
            ok "log level: $nl"; pause ;;
       0|_) return ;;
     esac
@@ -3104,7 +3428,7 @@ screen_uninstall() {
     stop_tunnel_hard "$n"
     set_restart_timer "$n" off
   done
-  rm -f "$UNIT_FILE" "$RS_UNIT" "$RS_TIMER" "$PROXY_UNIT" "$LEGACY_SOCKS_UNIT"
+  rm -f "$UNIT_FILE" "$RS_UNIT" "$RS_TIMER" "$PROXY_UNIT" "$LEGACY_SOCKS_UNIT" "$GOST_UNIT"
   systemctl daemon-reload 2>/dev/null
   rm -f "$BIN_PATH" "$BIN_PATH.bak" "$GOST_BIN"
   rm -rf "$BASE_DIR"
@@ -3118,7 +3442,8 @@ main_menu() {
     header
     local tot run
     tot="$(tunnel_count)"
-    run="$(systemctl list-units 'backhaul@*' --state=running --no-legend 2>/dev/null | grep -c .)"
+    run="$( { systemctl list-units 'backhaul@*' --state=running --no-legend 2>/dev/null
+              systemctl list-units 'eris-gost@*' --state=running --no-legend 2>/dev/null; } | grep -c .)"
     top
     row "$(printf '%s%s%s tunnels   %s%s%s running   %s%s%s' "$W$BD" "$tot" "$N" "$G$BD" "$run" "$N" "$D" \
         "$([ -x "$BIN_PATH" ] && echo 'core ready' || echo 'core missing')" "$N")"

@@ -3,6 +3,75 @@
 All notable changes to **Eris Tunnel 2** are recorded here.
 This project follows [Semantic Versioning](https://semver.org/).
 
+## [2.0.0] - 2026-09-09
+
+### Added
+
+- **A second tunnel engine: [gost](https://github.com/go-gost/gost).** Right
+  after you pick the side (IRAN or KHAREJ), the manager asks which engine to
+  run:
+
+  ```
+   1 ▸ Backhaul    the classic core, profiles apply
+   2 ▸ gost        relay + rtcp, more transports
+  ```
+
+  Both sides of a tunnel must run the same one, and the pair code carries the
+  choice, so a KHAREJ side pairing from a gost code sets itself up as gost even
+  if you picked otherwise (it says so when it does).
+
+- **How the gost engine is wired.** IRAN runs a relay with remote binding
+  enabled, and KHAREJ asks it to open the ports:
+
+  ```
+  IRAN     gost -L "relay+mtls://user:token@:443?bind=true"
+  KHAREJ   gost -L "rtcp://:8000/127.0.0.1:8000"                 -L "rtcp://:2087/127.0.0.1:2087"                 -F "relay+mtls://user:token@IRAN:443"
+  ```
+
+  `bind=true` is what lets the far side open ports on your IRAN server, so the
+  relay **always** requires credentials — the tunnel token is the password.
+
+- **Nine gost transports**, asked for at creation and changeable from
+  `[6] Endpoint`: `mtls` (default), `tls`, `tcp`, `mws`, `wss`, `ws`, `quic`,
+  `kcp`, `grpc`. gost makes its own certificate for the TLS ones, so there is
+  no certificate to pick.
+
+- gost tunnels run as `eris-gost@<tunnel>.service`, taking their whole argument
+  list from the tunnel's `gost.env`. `[8] Show config` prints the readable
+  command instead of a TOML file.
+
+- The main menu's `[6]` is now **ENGINES**: it shows both binaries with their
+  versions and installs either. gost is pinned to **v3.3.0**.
+
+### Changed
+
+- **The pair code is now B5**, carrying the engine and the gost transport.
+  `B4`, `B3`, `B2`, `B1` and `DBH-` prefixed codes still parse and mean
+  backhaul, so every existing tunnel keeps working.
+- Every systemd call now goes through the tunnel's own unit name, resolved from
+  its `meta.conf`, so backhaul and gost tunnels can sit side by side on one
+  server. The scheduled-restart timer gets a per-tunnel drop-in that names the
+  right unit.
+- Existing tunnels gain `ENGINE="backhaul"` on first load and behave exactly as
+  before.
+- gost is installed from a pinned URL rather than "latest release", so the
+  argument shapes above are the ones the binary actually implements.
+
+### Known limits of the gost engine
+
+- **The port list lives on KHAREJ.** With backhaul the IRAN config owns the
+  ports; with gost the `rtcp` listeners are on the client, so the pair code has
+  to carry them. Changing ports on a gost tunnel therefore means re-pairing the
+  KHAREJ side — the ports screen says so and re-prints the code.
+- **Performance profiles and per-value tuning are backhaul settings.** They tune
+  Backhaul's pool, channel size and mux buffers, none of which exist in gost, so
+  `[5] Profile` is hidden on a gost tunnel rather than pretending to work.
+- **TCP only.** `accept_udp` has no gost equivalent here; UDP forwarding
+  (`rudp`) is not wired up in this release.
+- User ports on a gost tunnel only appear on IRAN while KHAREJ is connected,
+  because the relay opens them on the client's behalf. The health check says
+  "is kharej connected?" rather than reporting a broken config.
+
 ## [1.7.0] - 2026-09-08
 
 ### Added
