@@ -16,7 +16,7 @@
 ```
 
 **Advanced Backhaul Reverse Tunnel Manager**
-`Version 2.0.0`
+`Version 2.1.0`
 Support: `@erisrttg`
 
 ---
@@ -258,21 +258,41 @@ be moved between modes from `Manage tunnels -> [9] SOCKS5 proxy`.
 | Where they live | `proxy.env` (mode 600), never in the unit file |
 | Transport | TCP only; SOCKS5 UDP ASSOCIATE is not carried |
 
-### Credentials are optional
+### Credentials decide who can reach it
 
 When you create a proxy tunnel it asks *"protect the proxy with a username and
-password?"*. Say yes and it asks which username and password you want; say no
-and it sets none. `[3] Credentials` on the proxy screen asks the same question
-again later, on either side. Pressing Enter at either prompt takes the generated
-suggestion.
+password?"*. `[3] Credentials` on the proxy screen asks the same question again
+later, on either side. Pressing Enter at either prompt takes the generated
+suggestion. The answer decides the listener's reach:
 
-> **Running without credentials means anyone who can reach `PROXY_PORT` can use
-> the proxy**, and whatever they send leaves from your KHAREJ server's ip — which
-> is a good way to get that server blacklisted or terminated. The manager warns
-> you when you choose it and keeps the warning on the status screen. Only do it
-> when something else already restricts who can reach the port.
+| Credentials | Who can use the proxy |
+| --- | --- |
+| **yes** | anyone on the internet who has the username and password |
+| **no** | only the IRAN server itself and the containers / VMs running on it |
 
 Whatever you choose, both ends must match — the pair code carries it.
+
+#### How local-only works
+
+A container reaches the host over a bridge address such as `172.17.0.1`, not
+over `127.0.0.1`, so binding to loopback would shut Docker out. Instead the
+listener binds everywhere and a small iptables chain, `ERISTUN2_GUARD`, accepts
+the proxy port only from local interfaces and drops everything else:
+
+```
+lo  docker0  br-+  podman+  cni+  lxdbr+  lxcbr+  virbr+
+```
+
+The fence is applied by `eris-proxy@.service` itself (`ExecStartPre` /
+`ExecStopPost`), so it is back after every reboot and gone the moment the proxy
+stops. It **fails closed**: if a fence is required and iptables is missing, the
+service refuses to start rather than starting open. On a server with no
+iptables at all, a credential-less proxy binds `127.0.0.1` only — containers
+cannot reach it, and the manager says so.
+
+From inside a container, point your app at the bridge gateway (`ip route |
+grep default` inside the container shows it, usually `172.17.0.1`) and the
+proxy port. From the host, `127.0.0.1`. No username or password either way.
 
 Worth knowing:
 
@@ -348,6 +368,7 @@ https://raw.githubusercontent.com/eris4444/eris-tunnel-2/main/eris-tunnel-2.sh
 /etc/eris-tunnel-2/
 /etc/eris-tunnel-2/tunnels/
 /etc/eris-tunnel-2/tunnels/<name>/proxy.env
+/etc/eris-tunnel-2/proxy-guard.sh
 /etc/eris-tunnel-2/certs/
 /etc/systemd/system/backhaul@.service
 /etc/systemd/system/eris-proxy@.service
@@ -388,7 +409,7 @@ either upstream project.
 
 ```
 Eris Tunnel 2
-Version: 2.0.0
+Version: 2.1.0
 Support: @erisrttg
 ```
 

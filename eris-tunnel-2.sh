@@ -36,7 +36,7 @@
 #  ERIS-TUNNEL-2-SCRIPT
 # ==============================================================================
 
-SCRIPT_VER="2.0.0"
+SCRIPT_VER="2.1.0"
 DEV_ID="@erisrttg"
 
 GH_REPO="Musixal/Backhaul"
@@ -57,6 +57,11 @@ GOST_BIN="/usr/local/bin/eris-gost"
 GOST_UNIT="/etc/systemd/system/eris-gost@.service"
 DEFAULT_GOST_TR="mtls"
 GOST_USER="eris"
+GUARD_CHAIN="ERISTUN2_GUARD"
+GUARD_SCRIPT="$BASE_DIR/proxy-guard.sh"
+# Interfaces a credential-less proxy may be reached from: the host itself and
+# the bridges its containers and vms hang off. Anything else is dropped.
+GUARD_IFACES="lo docker0 br-+ podman+ cni+ lxdbr+ lxcbr+ virbr+"
 DEFAULT_PROXY_PORT=1080
 DEFAULT_EXIT_PORT=1080
 SELF_PATH="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "$0")"
@@ -284,9 +289,15 @@ ask_proxy_creds() {
 proxy_auth_off() {
   PROXY_AUTH=false; PROXY_USER=""; PROXY_PASS=""
 }
-warn_open_proxy() { # <port>
-  warn "no username or password - anyone who reaches :$1 can use this proxy"
-  dim "whatever they send leaves from your kharej server's ip"
+note_local_proxy() { # <port>
+  if command -v iptables >/dev/null 2>&1; then
+    info "no credentials - :$1 answers this server and its containers only"
+    dim "the guard drops anything that did not arrive on a local interface"
+  else
+    warn "no credentials and no iptables - :$1 will bind to 127.0.0.1 only"
+    dim "containers will not reach it; install iptables or set a password"
+  fi
+  dim "give it a username and password to open it to the internet"
 }
 gen_proxy_pass() {
   if command -v openssl >/dev/null 2>&1; then openssl rand -base64 48 | tr -dc 'a-zA-Z0-9' | head -c 18
@@ -405,7 +416,7 @@ screen_core() {
   top; sect "INSTALLED"; blank
   kv "backhaul" "$W$(core_version_short)$N $D$BIN_PATH$N"
   kv "gost"     "$W$(gost_version)$N $D$GOST_BIN$N"
-  kv "arch"     "$Wlinux_$arch$N"
+  kv "arch"     "${W}linux_$arch$N"
   mid; sect "BACKHAUL CORE"
   item 1 "From GitHub" "latest release"
   item 2 "From $LOCAL_CORE_DIR" "offline"
@@ -624,6 +635,7 @@ gost_ensure() {
 # EnvironmentFile and the credentials never touch the unit file.
 proxy_write_unit() {
   local b; b="$(gost_path)"; [ -n "$b" ] || return 1
+  proxy_write_guard
   cat > "$PROXY_UNIT" <<EOF
 [Unit]
 Description=Eris Tunnel 2 - socks5 proxy (%i)
@@ -634,7 +646,11 @@ StartLimitIntervalSec=0
 [Service]
 Type=simple
 EnvironmentFile=$TUN_DIR/%i/proxy.env
+# fence a credential-less listener before it opens; a failure here keeps the
+# proxy down rather than up and open
+ExecStartPre=/bin/bash $GUARD_SCRIPT %i up
 ExecStart=$b \$GOST_ARGS
+ExecStopPost=/bin/bash $GUARD_SCRIPT %i down
 Restart=always
 RestartSec=3
 TimeoutStopSec=10
@@ -654,12 +670,29 @@ EOF
   return 0
 }
 # IRAN listens for users and chains into the tunnel; KHAREJ is the exit.
+# Where the IRAN listener binds. With credentials: everywhere. Without them it
+# is meant for this server and its containers only - and a container reaches
+# the host over a bridge address, not 127.0.0.1, so loopback alone would shut
+# them out. Bind everywhere and let the guard chain do the narrowing; with no
+# iptables to build that chain, fall back to loopback and stay closed.
+proxy_guardable() { command -v iptables >/dev/null 2>&1; }
+proxy_bind() {
+  if [ "${PROXY_AUTH:-false}" = true ]; then echo "0.0.0.0"
+  elif proxy_guardable; then echo "0.0.0.0"
+  else echo "127.0.0.1"; fi
+}
+proxy_guard_port() { # the port the guard must fence, or nothing
+  [ "$ROLE" = server ] || return 0
+  [ "${PROXY_AUTH:-false}" = true ] && return 0
+  proxy_guardable || return 0
+  printf '%s' "$PROXY_PORT"
+}
 proxy_args() {
   local a=""
   [ "${PROXY_AUTH:-false}" = true ] && a="$PROXY_USER:$PROXY_PASS@"
   if [ "$ROLE" = server ]; then
-    printf -- '-L socks5://%s0.0.0.0:%s -F socks5://%s127.0.0.1:%s' \
-      "$a" "$PROXY_PORT" "$a" "$BRIDGE_PORT"
+    printf -- '-L socks5://%s%s:%s -F socks5://%s127.0.0.1:%s' \
+      "$a" "$(proxy_bind)" "$PROXY_PORT" "$a" "$BRIDGE_PORT"
   else
     printf -- '-L socks5://%s127.0.0.1:%s' "$a" "$EXIT_PORT"
   fi
@@ -667,8 +700,75 @@ proxy_args() {
 proxy_env_write() { # <name>
   local d="$TUN_DIR/$1"
   [ -d "$d" ] || return 1
-  printf 'GOST_ARGS=%s\n' "$(proxy_args)" > "$d/proxy.env"
+  { printf 'GOST_ARGS=%s\n' "$(proxy_args)"
+    printf 'GUARD_PORT=%s\n' "$(proxy_guard_port)"
+  } > "$d/proxy.env"
   chmod 600 "$d/proxy.env"
+}
+proxy_guard_active() { # <port> - is the guard's drop rule in place?
+  proxy_guardable || return 1
+  iptables -w 5 -C "$GUARD_CHAIN" -p tcp --dport "$1" -j DROP >/dev/null 2>&1
+}
+# The guard runs from the unit (ExecStartPre / ExecStopPost) rather than from
+# the manager, so it is back after every reboot and gone when the proxy stops.
+# It records the port it fenced, because by the time it runs on the way down
+# the env file may already describe a different one.
+proxy_write_guard() {
+  cat > "$GUARD_SCRIPT" <<EOF
+#!/usr/bin/env bash
+# Eris Tunnel 2 - proxy guard. Called by eris-proxy@.service, not by hand.
+#   up    fence GUARD_PORT so only local interfaces reach it
+#   down  remove whatever up added
+set -u
+name="\${1:-}"; action="\${2:-}"
+[ -n "\$name" ] || exit 0
+dir="$TUN_DIR/\$name"
+CHAIN="$GUARD_CHAIN"
+IFACES="$GUARD_IFACES"
+port=""
+[ -r "\$dir/proxy.env" ] && port="\$(grep -m1 '^GUARD_PORT=' "\$dir/proxy.env" | cut -d= -f2)"
+[[ "\$port" =~ ^[0-9]+\$ ]] || port=""
+prev=""
+[ -r "\$dir/guard.port" ] && prev="\$(cat "\$dir/guard.port")"
+[[ "\$prev" =~ ^[0-9]+\$ ]] || prev=""
+ipt() { iptables -w 5 "\$@"; }
+fence_del() { # <port> - every rule up may have added for it
+  local p="\$1" i
+  for i in \$IFACES; do
+    while ipt -C "\$CHAIN" -p tcp --dport "\$p" -i "\$i" -j ACCEPT 2>/dev/null; do
+      ipt -D "\$CHAIN" -p tcp --dport "\$p" -i "\$i" -j ACCEPT || break
+    done
+  done
+  while ipt -C "\$CHAIN" -p tcp --dport "\$p" -j DROP 2>/dev/null; do
+    ipt -D "\$CHAIN" -p tcp --dport "\$p" -j DROP || break
+  done
+}
+case "\$action" in
+  up)
+    [ -n "\$prev" ] && command -v iptables >/dev/null 2>&1 && fence_del "\$prev"
+    rm -f "\$dir/guard.port"
+    [ -n "\$port" ] || exit 0
+    if ! command -v iptables >/dev/null 2>&1; then
+      echo "eris-proxy: iptables is missing - refusing to start an unfenced proxy on :\$port" >&2
+      exit 1
+    fi
+    ipt -N "\$CHAIN" 2>/dev/null
+    ipt -C INPUT -j "\$CHAIN" 2>/dev/null || ipt -I INPUT 1 -j "\$CHAIN" || exit 1
+    fence_del "\$port"
+    for i in \$IFACES; do ipt -A "\$CHAIN" -p tcp --dport "\$port" -i "\$i" -j ACCEPT || exit 1; done
+    ipt -A "\$CHAIN" -p tcp --dport "\$port" -j DROP || exit 1
+    printf '%s\n' "\$port" > "\$dir/guard.port"
+    ;;
+  down)
+    command -v iptables >/dev/null 2>&1 || exit 0
+    [ -n "\$prev" ] && fence_del "\$prev"
+    [ -n "\$port" ] && [ "\$port" != "\$prev" ] && fence_del "\$port"
+    rm -f "\$dir/guard.port"
+    ;;
+esac
+exit 0
+EOF
+  chmod 0755 "$GUARD_SCRIPT"
 }
 proxy_raw()  { systemctl is-active "eris-proxy@$1" 2>/dev/null; }
 proxy_down() {
@@ -1629,6 +1729,37 @@ sweep_web_dashboard() {
   return 0
 }
 
+# 2.1.0 fences a credential-less proxy. One started by an older build is still
+# running unfenced until its unit restarts, so offer to do that now.
+sweep_open_proxies() {
+  local n open=()
+  while read -r n; do
+    [ -n "$n" ] || continue
+    load_meta "$n" >/dev/null 2>&1 || continue
+    [ "$MODE" = proxy ] && [ "$ROLE" = server ] && [ "$PROXY_AUTH" != true ] || continue
+    [ "$(proxy_raw "$n")" = active ] || continue
+    grep -q '^GUARD_PORT=[0-9]' "$TUN_DIR/$n/proxy.env" 2>/dev/null && proxy_guard_active "$PROXY_PORT" && continue
+    open+=("$n")
+  done <<<"$(tunnel_names)"
+  [ ${#open[@]} -eq 0 ] && return 0
+  echo
+  top; sect "OPEN PROXIES"
+  row "$(printf '%sthese socks5 proxies have no credentials and were started%s' "$D" "$N")"
+  row "$(printf '%sby an older build, so they still answer the whole internet:%s' "$D" "$N")"
+  blank
+  for n in "${open[@]}"; do row "$(printf '%s%s%s' "$Y" "$n" "$N")"; done
+  bot; echo
+  if yesno "fence them now? (rewrites proxy.env and restarts the proxy)" y; then
+    for n in "${open[@]}"; do
+      load_meta "$n" >/dev/null 2>&1 || continue
+      proxy_env_write "$n"
+      proxy_up "$n" && ok "$n - local only now" || bad "$n - proxy did not come back up"
+    done
+    pause
+  fi
+  return 0
+}
+
 # Catches leftovers from a hard kill, a dropped ssh session or an older build.
 sweep_partials() {
   local n broken=()
@@ -1897,7 +2028,7 @@ screen_new_iran() {
       ask_proxy_creds
     else
       proxy_auth_off
-      warn_open_proxy "$PROXY_PORT"
+      note_local_proxy "$PROXY_PORT"
     fi
     ok "users will connect to :$PROXY_PORT"
     dim "bridge 127.0.0.1:$BRIDGE_PORT  ->  kharej 127.0.0.1:$EXIT_PORT"
@@ -2250,9 +2381,16 @@ screen_proxy() {
       kv "user"     "$W$PROXY_USER$N"
       kv "password" "$W$PROXY_PASS$N"
     else
-      kv "auth" "$(badge "NONE" "$BG_WARN$W")"
-      [ "$MODE" = proxy ] && [ "$ROLE" = server ] && \
-        row "$(printf '%sanyone who reaches :%s can use this proxy%s' "$Y" "${PROXY_PORT:-?}" "$N")"
+      kv "auth" "$(badge "NONE" "$BG_WARN$W") ${D}local only$N"
+      if [ "$MODE" = proxy ] && [ "$ROLE" = server ]; then
+        if proxy_guard_active "$PROXY_PORT"; then
+          kv "reach" "${G}this server + its containers$N $D- guard is up$N"
+        elif proxy_guardable; then
+          kv "reach" "${Y}guard not applied yet$N $D- restart the proxy [4]$N"
+        else
+          kv "reach" "${Y}127.0.0.1 only$N $D- no iptables, containers shut out$N"
+        fi
+      fi
     fi
     mid
     if [ "$ROLE" = server ]; then
@@ -2299,7 +2437,7 @@ screen_proxy() {
                       "$([ "$PROXY_AUTH" = true ] && echo y || echo n)"; then
                ask_proxy_creds
              else
-               proxy_auth_off; warn_open_proxy "$pp"
+               proxy_auth_off; note_local_proxy "$pp"
              fi
              gost_ensure || { pause; continue; }
              PROXY_PORT="$pp"; BRIDGE_PORT="$bp"
@@ -2379,7 +2517,7 @@ screen_proxy() {
            ask_proxy_creds
          else
            proxy_auth_off
-           [ "$ROLE" = server ] && warn_open_proxy "${PROXY_PORT:-?}" \
+           [ "$ROLE" = server ] && note_local_proxy "${PROXY_PORT:-?}" \
              || warn "the exit will accept anything the tunnel hands it"
          fi
          meta_set "$name" PROXY_AUTH "$PROXY_AUTH"
@@ -2406,13 +2544,17 @@ screen_proxy() {
          fi
          echo; top; sect "CLIENT SETTINGS"; blank
          kv "type"     "${W}SOCKS5$N"
-         kv "host"     "$W${h:-<iran ip>}$N"
-         kv "port"     "$W$PROXY_PORT$N"
          if [ "$PROXY_AUTH" = true ]; then
+           kv "host"     "$W${h:-<iran ip>}$N"
+           kv "port"     "$W$PROXY_PORT$N"
            kv "user"     "$W$PROXY_USER$N"
            kv "password" "$W$PROXY_PASS$N"
          else
-           kv "auth"     "${D}none - leave username and password empty$N"
+           kv "host"     "${W}127.0.0.1$N $D- on this server$N"
+           row "$(printf '%s  from a container: the bridge gateway, e.g. 172.17.0.1%s' "$D" "$N")"
+           kv "port"     "$W$PROXY_PORT$N"
+           kv "auth"     "${D}none - and none needed, it only answers locally$N"
+           h="127.0.0.1"
          fi
          blank
          row "$(printf '%s%s%s' "$W" "$(proxy_uri "${h:-<iran-ip>}" "$PROXY_PORT")" "$N")"
@@ -3289,6 +3431,11 @@ health_check() {
           || bad "bridge NOT listening on 127.0.0.1:$BRIDGE_PORT"
         [ "$(proxy_raw "$n")" = active ] && ok "socks5 proxy active" \
           || bad "socks5 proxy not active - journalctl -u eris-proxy@$n"
+        if [ "$PROXY_AUTH" != true ]; then
+          if proxy_guard_active "$PROXY_PORT"; then ok "guard up - :$PROXY_PORT answers local interfaces only"
+          elif proxy_guardable; then bad "guard missing - :$PROXY_PORT may be open, restart the proxy"
+          else warn "no iptables - :$PROXY_PORT is bound to 127.0.0.1, containers cannot reach it"; fi
+        fi
         ss -tln 2>/dev/null | grep -qE "[:.]$PROXY_PORT\b" \
           && ok "proxy port $PROXY_PORT is listening" || bad "proxy port $PROXY_PORT NOT listening"
       else
@@ -3428,7 +3575,12 @@ screen_uninstall() {
     stop_tunnel_hard "$n"
     set_restart_timer "$n" off
   done
-  rm -f "$UNIT_FILE" "$RS_UNIT" "$RS_TIMER" "$PROXY_UNIT" "$LEGACY_SOCKS_UNIT" "$GOST_UNIT"
+  if command -v iptables >/dev/null 2>&1; then
+    iptables -w 5 -D INPUT -j "$GUARD_CHAIN" >/dev/null 2>&1
+    iptables -w 5 -F "$GUARD_CHAIN" >/dev/null 2>&1
+    iptables -w 5 -X "$GUARD_CHAIN" >/dev/null 2>&1
+  fi
+  rm -f "$UNIT_FILE" "$RS_UNIT" "$RS_TIMER" "$PROXY_UNIT" "$LEGACY_SOCKS_UNIT" "$GOST_UNIT" "$GUARD_SCRIPT"
   systemctl daemon-reload 2>/dev/null
   rm -f "$BIN_PATH" "$BIN_PATH.bak" "$GOST_BIN"
   rm -rf "$BASE_DIR"
@@ -3477,4 +3629,5 @@ purge_legacy_socks
 sweep_partials
 sweep_web_dashboard
 ensure_units
+sweep_open_proxies
 main_menu

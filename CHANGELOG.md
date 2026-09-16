@@ -3,6 +3,61 @@
 All notable changes to **Eris Tunnel 2** are recorded here.
 This project follows [Semantic Versioning](https://semver.org/).
 
+## [2.1.0] - 2026-09-16
+
+### Changed
+
+- **A socks5 proxy without credentials is now local-only.** It answers the
+  IRAN server itself and the containers and VMs running on it, and nothing
+  else. With a username and password it listens to the whole internet, as
+  before. Which one you get follows the credentials setting, nothing new to
+  configure.
+
+  A container reaches the host over a bridge address such as `172.17.0.1`, not
+  over `127.0.0.1`, so binding to loopback would have shut Docker out. Instead
+  the listener binds everywhere and a small iptables chain, `ERISTUN2_GUARD`,
+  accepts the proxy port only from local interfaces and drops the rest:
+
+  ```
+  lo  docker0  br-+  podman+  cni+  lxdbr+  lxcbr+  virbr+
+  ```
+
+- **The guard is applied by the service, not by the manager.**
+  `eris-proxy@.service` runs `proxy-guard.sh <tunnel> up` as `ExecStartPre` and
+  `down` as `ExecStopPost`, so the fence is back after every reboot and gone the
+  moment the proxy stops. The manager never has to be running for it to hold.
+
+- **It fails closed.** If a fence is required and iptables is missing, the
+  service refuses to start rather than starting open. On a server that has no
+  iptables at all, a credential-less proxy is written to bind `127.0.0.1` only
+  — containers cannot reach it, and the manager says so.
+
+- The guard remembers which port it fenced (`guard.port`), so changing the
+  proxy port or turning credentials on removes the old fence on the way down
+  rather than leaving it behind.
+
+- The `[9]` proxy screen shows what the listener actually reaches — *this
+  server + its containers* with the guard up, or a nudge to restart the proxy if
+  the fence is not yet applied — and Client settings points a credential-less
+  proxy at `127.0.0.1` (or the bridge gateway from inside a container) instead
+  of the public ip, which would not answer.
+
+- The health check reports the guard: up, missing, or unavailable.
+
+- A credential-less proxy started by 2.0.0 is still open until its unit
+  restarts. `sweep_open_proxies` runs at startup, lists those, and offers to
+  fence them on the spot.
+
+- Uninstall removes the guard chain, its `INPUT` hook and the guard script.
+
+### Fixed
+
+- Two status rows lost their text to a shell quirk: `$Dlocal` and `$Wlinux_`
+  were read as (empty) variables named `Dlocal` and `Wlinux_`, so the ENGINES
+  screen's arch row printed without its `linux_` prefix. Both now use `${D}` /
+  `${W}`, and a sweep confirms no other colour variable is glued to a word.
+- The client-settings hint about the bridge gateway overflowed the frame.
+
 ## [2.0.0] - 2026-09-09
 
 ### Added
